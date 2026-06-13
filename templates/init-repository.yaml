@@ -1,0 +1,34 @@
+rootDirectories:
+  - charts
+  - projects
+
+gitignore: |
+  .DS_Store
+  Chart.lock
+  *.tgz
+  .render-cache/
+  .dep.md5
+
+stage:
+  directories:
+    - apps
+    - namespaces
+    - rbac/cluster-roles
+    - rbac/groups
+    - rbac/sa
+    - rbac/users
+    - networkpolicy
+  stageYaml:
+    server: https://kubernetes.default.svc
+    repoUrl: https://git.example.com/org/repo.git
+    branch: master
+    projectNamespace: ""
+
+nextSteps:
+  - "Create config:      argocd-render --init-config (creates projects/root-project.yaml)"
+  - "Edit config:        projects/root-project.yaml (argocd settings)"
+  - "Edit stage config:  projects/{stage}/main.yaml (repo URL, namespaces)"
+  - "Add namespaces:     projects/{stage}/namespaces/<name>.yaml"
+  - "Add apps:           projects/{stage}/<app>/app.yaml + values.yaml"
+  - "Add Helm charts:    charts/<chart>/Chart.yaml"
+  - "Run render:         argocd-render --stage {stage}"
