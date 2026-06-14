@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/md5"
 	"embed"
 	"encoding/hex"
+	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -15,7 +17,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"flag"
 
 	"gopkg.in/yaml.v3"
 )
@@ -257,7 +258,7 @@ func isSOPSEncrypted(filePath string) bool {
 		return false
 	}
 	defer f.Close()
-	scanner := newLineScanner(f)
+	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		if strings.HasPrefix(scanner.Text(), "sops:") {
 			return true
@@ -324,7 +325,9 @@ func encryptSOPSSecrets(outputDir string, kinds []string, saved map[string]encry
 				if entry, ok := saved[e.Name()]; ok {
 					var newData map[string]interface{}
 					if err := yaml.Unmarshal(newPlain, &newData); err == nil && deepEqualMap(newData, entry.data) {
-						os.WriteFile(fp, []byte(entry.ciphertext), 0644)
+						if err := os.WriteFile(fp, []byte(entry.ciphertext), 0644); err != nil {
+							fmt.Fprintf(os.Stderr, "  WARNING restore encrypted %s: %v\n", e.Name(), err)
+						}
 						continue
 					}
 				}
@@ -335,7 +338,9 @@ func encryptSOPSSecrets(outputDir string, kinds []string, saved map[string]encry
 				fmt.Fprintf(os.Stderr, "  WARNING sops encrypt %s: %s\n", e.Name(), strings.TrimSpace(string(out)))
 				continue
 			}
-			os.WriteFile(fp, out, 0644)
+			if err := os.WriteFile(fp, out, 0644); err != nil {
+				fmt.Fprintf(os.Stderr, "  WARNING write encrypted %s: %v\n", e.Name(), err)
+			}
 		}
 	}
 }
@@ -459,6 +464,18 @@ func fileStem(path string) string {
 	return strings.TrimSuffix(base, ext)
 }
 
+func loadInfraAppConfig(infraDir string) map[string]interface{} {
+	configFile := filepath.Join(infraDir, "app.yaml")
+	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+		return nil
+	}
+	data := loadYAML(configFile)
+	if len(data) == 0 {
+		return nil
+	}
+	return map[string]interface{}{"application": data}
+}
+
 func discoverInfraFiles(dir string) []string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -467,6 +484,9 @@ func discoverInfraFiles(dir string) []string {
 	var files []string
 	for _, e := range entries {
 		if e.IsDir() {
+			continue
+		}
+		if e.Name() == "app.yaml" || e.Name() == "app.yml" {
 			continue
 		}
 		if strings.HasSuffix(e.Name(), ".yaml") || strings.HasSuffix(e.Name(), ".yml") {
@@ -481,6 +501,9 @@ func discoverInfraFilesRecursive(dir string) []string {
 	var files []string
 	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
+			return nil
+		}
+		if d.Name() == "app.yaml" || d.Name() == "app.yml" {
 			return nil
 		}
 		if strings.HasSuffix(d.Name(), ".yaml") || strings.HasSuffix(d.Name(), ".yml") {
@@ -559,7 +582,9 @@ func renderProject(stageDir, stageName string, stageMeta map[string]interface{},
 		data, _ := os.ReadFile(projFile)
 		os.RemoveAll(projOutDir)
 		os.MkdirAll(projOutDir, 0755)
-		os.WriteFile(targetPath, data, 0644)
+		if err := os.WriteFile(targetPath, data, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "  WARNING write project %s: %v\n", stageName, err)
+		}
 	}
 
 	// Generate Application CR — directory source, root-repo-url
@@ -628,6 +653,7 @@ func renderInfraFullRender(stageDir, outputBase, stageName string, stageMeta map
 
 	// 2. Namespaces (syncWave: 0, per file)
 	nsDir := filepath.Join(stageDir, "namespaces")
+	nsConfig := loadInfraAppConfig(nsDir)
 	nsFiles := discoverInfraFiles(nsDir)
 	for _, f := range nsFiles {
 		values := loadYAML(f)
@@ -661,7 +687,7 @@ func renderInfraFullRender(stageDir, outputBase, stageName string, stageMeta map
 			"namespace": nsName,
 		})
 		if app != nil {
-			applyAppSettings(app, nil)
+			applyAppSettings(app, nsConfig)
 			argocdAppsDir := filepath.Join(repoRoot, "rendered", "argocd", "applications")
 			writeYAML(filepath.Join(argocdAppsDir, appName+".yaml"), app)
 		}
@@ -681,6 +707,7 @@ func renderInfraFullRender(stageDir, outputBase, stageName string, stageMeta map
 
 	// 3. RBAC (syncWave: 1, aggregated)
 	rbacDir := filepath.Join(stageDir, "rbac")
+	rbacConfig := loadInfraAppConfig(rbacDir)
 	rbacFiles := discoverInfraFilesRecursive(rbacDir)
 	if len(rbacFiles) > 0 {
 		rbacValues := make(map[string]interface{})
@@ -709,7 +736,7 @@ func renderInfraFullRender(stageDir, outputBase, stageName string, stageMeta map
 					"namespace": "default",
 				})
 				if app != nil {
-					applyAppSettings(app, nil)
+					applyAppSettings(app, rbacConfig)
 					argocdAppsDir := filepath.Join(repoRoot, "rendered", "argocd", "applications")
 					writeYAML(filepath.Join(argocdAppsDir, appName+".yaml"), app)
 				}
@@ -720,6 +747,7 @@ func renderInfraFullRender(stageDir, outputBase, stageName string, stageMeta map
 
 	// 4. NetworkPolicy (syncWave: 2, aggregated)
 	npDir := filepath.Join(stageDir, "networkpolicy")
+	npConfig := loadInfraAppConfig(npDir)
 	npFiles := discoverInfraFiles(npDir)
 	if len(npFiles) > 0 {
 		npValues := make(map[string]interface{})
@@ -748,7 +776,7 @@ func renderInfraFullRender(stageDir, outputBase, stageName string, stageMeta map
 					"namespace": "default",
 				})
 				if app != nil {
-					applyAppSettings(app, nil)
+					applyAppSettings(app, npConfig)
 					argocdAppsDir := filepath.Join(repoRoot, "rendered", "argocd", "applications")
 					writeYAML(filepath.Join(argocdAppsDir, appName+".yaml"), app)
 				}
@@ -787,6 +815,7 @@ func renderInfraDefaultMode(stageDir, stageName string, stageMeta map[string]int
 
 	// 2. Namespaces (per file)
 	nsDir := filepath.Join(stageDir, "namespaces")
+	nsConfig := loadInfraAppConfig(nsDir)
 	nsFiles := discoverInfraFiles(nsDir)
 	for _, f := range nsFiles {
 		data := loadYAML(f)
@@ -817,7 +846,7 @@ func renderInfraDefaultMode(stageDir, stageName string, stageMeta map[string]int
 			"namespace":    nsName,
 		})
 		if app != nil {
-			applyAppSettings(app, nil)
+			applyAppSettings(app, nsConfig)
 			writeYAML(filepath.Join(argocdAppsDir, appName+".yaml"), app)
 		}
 		fmt.Printf("  Application: namespace/%s (helm)\n", nsName)
@@ -825,6 +854,7 @@ func renderInfraDefaultMode(stageDir, stageName string, stageMeta map[string]int
 
 	// 3. RBAC (aggregated valueFiles)
 	rbacDir := filepath.Join(stageDir, "rbac")
+	rbacConfig := loadInfraAppConfig(rbacDir)
 	rbacFiles := discoverInfraFilesRecursive(rbacDir)
 	if len(rbacFiles) > 0 {
 		appName := stageName + "-rbac"
@@ -863,7 +893,7 @@ func renderInfraDefaultMode(stageDir, stageName string, stageMeta map[string]int
 			}
 		}
 		if app != nil {
-			applyAppSettings(app, nil)
+			applyAppSettings(app, rbacConfig)
 			writeYAML(filepath.Join(argocdAppsDir, appName+".yaml"), app)
 		}
 		fmt.Printf("  Application: rbac (helm, %d files)\n", len(rbacFiles))
@@ -871,6 +901,7 @@ func renderInfraDefaultMode(stageDir, stageName string, stageMeta map[string]int
 
 	// 4. NetworkPolicy (aggregated valueFiles)
 	npDir := filepath.Join(stageDir, "networkpolicy")
+	npConfig := loadInfraAppConfig(npDir)
 	npFiles := discoverInfraFiles(npDir)
 	if len(npFiles) > 0 {
 		appName := stageName + "-networkpolicy"
@@ -909,7 +940,7 @@ func renderInfraDefaultMode(stageDir, stageName string, stageMeta map[string]int
 			}
 		}
 		if app != nil {
-			applyAppSettings(app, nil)
+			applyAppSettings(app, npConfig)
 			writeYAML(filepath.Join(argocdAppsDir, appName+".yaml"), app)
 		}
 		fmt.Printf("  Application: networkpolicy (helm, %d files)\n", len(npFiles))
@@ -984,7 +1015,9 @@ func helmDepBuild(chartDir string) bool {
 		fmt.Fprintf(os.Stderr, "  ERROR helm dep build %s: %s\n", filepath.Base(chartDir), strings.TrimSpace(string(out)))
 		return false
 	}
-	os.WriteFile(hashFile, []byte(currentHash), 0644)
+	if err := os.WriteFile(hashFile, []byte(currentHash), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "  WARNING write dep cache %s: %v\n", filepath.Base(chartDir), err)
+	}
 	return true
 }
 
@@ -1690,7 +1723,7 @@ func cleanupStaleApps(argocdAppsDir, stageName string, activeApps, activeRepos m
 // --- Init ---
 
 func cmdInit(stageName string) {
-	fmt.Println("Initializing GitOps repository structure...\n")
+	fmt.Println("Initializing GitOps repository structure...")
 	initData, err := embeddedFS.ReadFile("templates/init-repository.yaml")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: init template not found: %v\n", err)
@@ -1725,7 +1758,9 @@ func cmdInit(stageName string) {
 		fmt.Printf("  Exists: %s\n", rel)
 	} else {
 		gitignore, _ := initTemplate["gitignore"].(string)
-		os.WriteFile(gitignorePath, []byte(gitignore), 0644)
+		if err := os.WriteFile(gitignorePath, []byte(gitignore), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "  ERROR write .gitignore: %v\n", err)
+		}
 		rel, _ := filepath.Rel(repoRoot, gitignorePath)
 		fmt.Printf("  Created: %s\n", rel)
 	}
@@ -1749,7 +1784,7 @@ func cmdInit(stageName string) {
 }
 
 func cmdInitConfig() {
-	fmt.Println("Creating projects/root-project.yaml...\n")
+	fmt.Println("Creating projects/root-project.yaml...")
 	configPath := filepath.Join(repoRoot, "projects", "root-project.yaml")
 	if _, err := os.Stat(configPath); err == nil {
 		rel, _ := filepath.Rel(repoRoot, configPath)
@@ -1950,49 +1985,6 @@ func setNestedKey(m map[string]interface{}, value interface{}, keys ...string) {
 		m = v
 	}
 	m[keys[len(keys)-1]] = value
-}
-
-func newLineScanner(r io.Reader) *lineScanner {
-	return &lineScanner{reader: r, buf: make([]byte, 0, 4096)}
-}
-
-type lineScanner struct {
-	reader io.Reader
-	buf    []byte
-	line   string
-	done   bool
-}
-
-func (s *lineScanner) Scan() bool {
-	if s.done {
-		return false
-	}
-	for {
-		idx := bytes.IndexByte(s.buf, '\n')
-		if idx >= 0 {
-			s.line = string(s.buf[:idx])
-			s.buf = s.buf[idx+1:]
-			return true
-		}
-		tmp := make([]byte, 4096)
-		n, err := s.reader.Read(tmp)
-		if n > 0 {
-			s.buf = append(s.buf, tmp[:n]...)
-		}
-		if err != nil {
-			s.done = true
-			if len(s.buf) > 0 {
-				s.line = string(s.buf)
-				s.buf = nil
-				return true
-			}
-			return false
-		}
-	}
-}
-
-func (s *lineScanner) Text() string {
-	return s.line
 }
 
 // --- Main ---

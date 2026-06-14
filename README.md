@@ -367,6 +367,57 @@ application:
     - RespectIgnoreDifferences=true
 ```
 
+#### Кастомизация инфраструктурных Application CR
+
+Для инфраструктурных ресурсов (namespaces, rbac, networkpolicy) также доступна кастомизация Application CR. Создай файл `app.yaml` в соответствующей директории:
+
+```
+projects/<stage>/
+├── networkpolicy/
+│   ├── app.yaml          ← кастомизация syncPolicy
+│   ├── deny-all.yaml
+│   └── deny-all-rvc1.yaml
+├── rbac/
+│   ├── app.yaml          ← кастомизация syncPolicy
+│   └── ...
+└── namespaces/
+    ├── app.yaml          ← кастомизация syncPolicy
+    └── ...
+```
+
+Формат `app.yaml` для инфры — тот же, что и для приложений:
+
+```yaml
+prune: false
+selfHeal: true
+syncOptions:
+  - ServerSideApply=true
+finalizers: []
+```
+
+Пример — отключить prune для networkpolicy:
+```yaml
+# projects/production/networkpolicy/app.yaml
+prune: false
+```
+
+Пример — кастомные finalizers для rbac:
+```yaml
+# projects/production/rbac/app.yaml
+finalizers: []
+syncOptions:
+  - ServerSideApply=true
+```
+
+Дефолтные значения (если `app.yaml` отсутствует):
+
+| Параметр | По умолчанию |
+|----------|-------------|
+| `prune` | `true` |
+| `selfHeal` | `true` |
+| `syncOptions` | `["ServerSideApply=true", "RespectIgnoreDifferences=true"]` |
+| `finalizers` | `["resources-finalizer.argocd.argoproj.io"]` |
+
 ### values.yaml (для kubernetes-resources)
 
 Namespace:
