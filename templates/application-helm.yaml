@@ -18,7 +18,9 @@ spec:
     helm:
       releaseName: ${release_name}
       valueFiles:
+        - ${chart_values}
         - ${values_path}
+      ignoreMissingValueFiles: true
   destination:
     server: ${server}
     namespace: ${namespace}
