@@ -1829,17 +1829,20 @@ func cmdInit(stageName string) {
 	}
 }
 
-func cmdInitConfig() {
+// cmdInitConfig creates projects/root-project.yaml. Returns true if the file was
+// created (or actionable), false if it already existed or could not be written.
+// It never calls os.Exit so it can be composed into an init flow.
+func cmdInitConfig() bool {
 	fmt.Println("Creating projects/root-project.yaml...")
 	configPath := filepath.Join(repoRoot, "projects", "root-project.yaml")
 	if _, err := os.Stat(configPath); err == nil {
 		rel, _ := filepath.Rel(repoRoot, configPath)
 		fmt.Fprintf(os.Stderr, "  Already exists: %s\n", rel)
-		os.Exit(1)
+		return false
 	}
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "  ERROR: %v\n", err)
-		os.Exit(1)
+		return false
 	}
 	configExample := map[string]interface{}{
 		"argocd": map[string]interface{}{
@@ -1850,11 +1853,12 @@ func cmdInitConfig() {
 	}
 	if err := writeYAML(configPath, configExample); err != nil {
 		fmt.Fprintf(os.Stderr, "  ERROR: %v\n", err)
-		os.Exit(1)
+		return false
 	}
 	rel, _ := filepath.Rel(repoRoot, configPath)
 	fmt.Printf("  Created: %s\n", rel)
 	fmt.Printf("  --> Edit with your ArgoCD settings\n")
+	return true
 }
 
 func createStage(initTemplate map[string]interface{}, stageName string) {
@@ -2045,8 +2049,14 @@ func main() {
 		setArgs    multiString
 	)
 
-	// Manual --init handling: filter it from args before flag.Parse
+	// Pre-scan args for init-related flags (--init, --init-config, --stage)
+	// before flag.Parse. --init consumes a positional stage OR pairs with the
+	// standard --stage flag. All actions run AFTER the full scan so that
+	// combinations like `--init --init-config --stage X` work.
+	wantInit := false
+	wantInitConfig := false
 	initStage := ""
+	flagStage := ""
 	filteredArgs := make([]string, 0, len(os.Args))
 	filteredArgs = append(filteredArgs, os.Args[0])
 	skipNext := false
@@ -2055,23 +2065,48 @@ func main() {
 			skipNext = false
 			continue
 		}
-		if os.Args[i] == "--init" {
+		switch os.Args[i] {
+		case "--init":
+			wantInit = true
 			if i+1 < len(os.Args) && !strings.HasPrefix(os.Args[i+1], "-") {
 				initStage = os.Args[i+1]
 				skipNext = true
 			}
 			continue
-		}
-		if os.Args[i] == "--init-config" {
-			cmdInitConfig()
-			return
+		case "--init-config":
+			wantInitConfig = true
+			continue
+		case "--stage":
+			if i+1 < len(os.Args) && !strings.HasPrefix(os.Args[i+1], "-") {
+				flagStage = os.Args[i+1]
+				skipNext = true
+			}
+			continue
 		}
 		filteredArgs = append(filteredArgs, os.Args[i])
 	}
 
-	if len(filteredArgs) == 1 && initStage != "" || (len(os.Args) > 1 && os.Args[1] == "--init" && len(filteredArgs) == 1) {
-		cmdInit(initStage)
-		return
+	// Resolve init flow first so it never falls through to rendering.
+	if wantInit || wantInitConfig {
+		if wantInitConfig {
+			created := cmdInitConfig()
+			// When invoked standalone (without --init), exit after config creation
+			// to preserve prior behavior.
+			if !wantInit {
+				if !created {
+					os.Exit(1)
+				}
+				return
+			}
+		}
+		if wantInit {
+			stage := initStage
+			if stage == "" {
+				stage = flagStage
+			}
+			cmdInit(stage)
+			return
+		}
 	}
 
 	flagSet := newFlagSet("argocd-render")
@@ -2087,11 +2122,6 @@ func main() {
 
 	if *showVersion {
 		fmt.Printf("argocd-render %s\n", appVersion)
-		return
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "--init" {
-		cmdInit(initStage)
 		return
 	}
 
@@ -2193,6 +2223,8 @@ func newFlagSet(name string) *flag.FlagSet {
 		fmt.Fprintf(os.Stderr, "  %s --stage test --app grafana         Render specific app\n", name)
 		fmt.Fprintf(os.Stderr, "  %s --init                             Create directory structure\n", name)
 		fmt.Fprintf(os.Stderr, "  %s --init test                        Create stage test\n", name)
+		fmt.Fprintf(os.Stderr, "  %s --init --stage test                Create stage test (--stage form)\n", name)
+		fmt.Fprintf(os.Stderr, "  %s --init --init-config --stage test  Create config + stage test\n", name)
 		fmt.Fprintf(os.Stderr, "  %s --init-config                      Create projects/root-project.yaml\n", name)
 		fmt.Fprintf(os.Stderr, "  %s --full-render                      Full render to raw YAML\n", name)
 		fmt.Fprintf(os.Stderr, "  %s --set image.tag=v1.0 --set replicas=3\n", name)
