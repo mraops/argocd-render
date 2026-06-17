@@ -55,7 +55,7 @@ func init() {
 	cacheDir = filepath.Join(repoRoot, ".render-cache")
 	helmHome = filepath.Join(cacheDir, "helm")
 	chartsDir = filepath.Join(repoRoot, "charts")
-	configFile = filepath.Join(repoRoot, "projects", "root-project.yaml")
+	configFile = yamlPath(filepath.Join(repoRoot, "projects", "root-project"))
 }
 
 var cachedConfig map[string]interface{}
@@ -194,6 +194,41 @@ func writeYAML(path string, data interface{}) error {
 		return err
 	}
 	return os.WriteFile(path, out, 0644)
+}
+
+// yamlPath resolves a base path (without extension) to the existing .yaml or
+// .yml file. Returns the .yaml path by default when neither exists, so callers
+// keep their original behavior on missing files.
+func yamlPath(base string) string {
+	if _, err := os.Stat(base + ".yaml"); err == nil {
+		return base + ".yaml"
+	}
+	if _, err := os.Stat(base + ".yml"); err == nil {
+		return base + ".yml"
+	}
+	return base + ".yaml"
+}
+
+// chartValuesFile returns "values.yaml" or "values.yml" depending on which
+// exists in chartDir. Used for valueFiles entries that are relative to the
+// chart path.
+func chartValuesFile(chartDir string) string {
+	if _, err := os.Stat(filepath.Join(chartDir, "values.yaml")); err == nil {
+		return "values.yaml"
+	}
+	if _, err := os.Stat(filepath.Join(chartDir, "values.yml")); err == nil {
+		return "values.yml"
+	}
+	return "values.yaml"
+}
+
+// yamlChartRelPath resolves a file under repoRoot to a path relative to the
+// chart directory, keeping its existing extension (.yaml preferred over .yml).
+// ArgoCD resolves helm valueFiles relative to the chart path, so paths must
+// climb out of the chart dir (e.g. ../../projects/.../values.yaml).
+func yamlChartRelPath(chartDir, absFile string) string {
+	rel, _ := filepath.Rel(chartDir, absFile)
+	return rel
 }
 
 // --- Template rendering ---
@@ -364,7 +399,7 @@ func discoverStages(stageFilter string) []string {
 		if !e.IsDir() {
 			continue
 		}
-		mainFile := filepath.Join(projectsDir, e.Name(), "main.yaml")
+		mainFile := yamlPath(filepath.Join(projectsDir, e.Name(), "main"))
 		if _, err := os.Stat(mainFile); os.IsNotExist(err) {
 			continue
 		}
@@ -387,7 +422,7 @@ func discoverApps(stageDir, appFilter string) []string {
 		if !e.IsDir() {
 			continue
 		}
-		appFile := filepath.Join(appsDir, e.Name(), "app.yaml")
+		appFile := yamlPath(filepath.Join(appsDir, e.Name(), "app"))
 		if _, err := os.Stat(appFile); os.IsNotExist(err) {
 			continue
 		}
@@ -465,7 +500,7 @@ func fileStem(path string) string {
 }
 
 func loadInfraAppConfig(infraDir string) map[string]interface{} {
-	configFile := filepath.Join(infraDir, "app.yaml")
+	configFile := yamlPath(filepath.Join(infraDir, "app"))
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
 		return nil
 	}
@@ -830,20 +865,21 @@ func renderInfraDefaultMode(stageDir, stageName string, stageMeta map[string]int
 		}
 		appName := stageName + "-namespace-" + nsName
 		active["namespace-"+nsName] = true
-		relPath, _ := filepath.Rel(filepath.Join(chartsDir, kubernetesResourcesChart), f)
+		chartDirAbs := filepath.Join(chartsDir, kubernetesResourcesChart)
 		app, _ := renderTemplate("application-helm.yaml", map[string]string{
-			"name":         appName,
-			"sync_wave":    "0",
-			"stage":        stageName,
-			"app_name":     "namespace-" + nsName,
-			"project":      rootProject,
-			"repo_url":     hubRepoURL,
-			"branch":       branch,
-			"chart_path":   "charts/" + kubernetesResourcesChart,
-			"values_path":  relPath,
-			"release_name": nsName,
-			"server":       server,
-			"namespace":    nsName,
+			"name":          appName,
+			"sync_wave":     "0",
+			"stage":         stageName,
+			"app_name":      "namespace-" + nsName,
+			"project":       rootProject,
+			"repo_url":      hubRepoURL,
+			"branch":        branch,
+			"chart_path":    "charts/" + kubernetesResourcesChart,
+			"chart_values":  chartValuesFile(chartDirAbs),
+			"values_path":   yamlChartRelPath(chartDirAbs, f),
+			"release_name":  nsName,
+			"server":        server,
+			"namespace":     nsName,
 		})
 		if app != nil {
 			applyAppSettings(app, nsConfig)
@@ -860,10 +896,11 @@ func renderInfraDefaultMode(stageDir, stageName string, stageMeta map[string]int
 		appName := stageName + "-rbac"
 		active["rbac"] = true
 
+		chartDirAbs := filepath.Join(chartsDir, kubernetesResourcesChart)
+		chartValues := chartValuesFile(chartDirAbs)
 		var relPaths []string
 		for _, f := range rbacFiles {
-			rel, _ := filepath.Rel(filepath.Join(chartsDir, kubernetesResourcesChart), f)
-			relPaths = append(relPaths, rel)
+			relPaths = append(relPaths, yamlChartRelPath(chartDirAbs, f))
 		}
 
 		app, _ := renderTemplate("application-helm.yaml", map[string]string{
@@ -875,6 +912,7 @@ func renderInfraDefaultMode(stageDir, stageName string, stageMeta map[string]int
 			"repo_url":     hubRepoURL,
 			"branch":       branch,
 			"chart_path":   "charts/" + kubernetesResourcesChart,
+			"chart_values": chartValues,
 			"values_path":  relPaths[0],
 			"release_name": "rbac",
 			"server":       server,
@@ -887,7 +925,7 @@ func renderInfraDefaultMode(stageDir, stageName string, stageMeta map[string]int
 				if source != nil {
 					helm, _ := source["helm"].(map[string]interface{})
 					if helm != nil {
-						helm["valueFiles"] = relPaths
+						helm["valueFiles"] = append([]string{chartValues}, relPaths...)
 					}
 				}
 			}
@@ -907,10 +945,11 @@ func renderInfraDefaultMode(stageDir, stageName string, stageMeta map[string]int
 		appName := stageName + "-networkpolicy"
 		active["networkpolicy"] = true
 
+		chartDirAbs := filepath.Join(chartsDir, kubernetesResourcesChart)
+		chartValues := chartValuesFile(chartDirAbs)
 		var relPaths []string
 		for _, f := range npFiles {
-			rel, _ := filepath.Rel(filepath.Join(chartsDir, kubernetesResourcesChart), f)
-			relPaths = append(relPaths, rel)
+			relPaths = append(relPaths, yamlChartRelPath(chartDirAbs, f))
 		}
 
 		app, _ := renderTemplate("application-helm.yaml", map[string]string{
@@ -922,6 +961,7 @@ func renderInfraDefaultMode(stageDir, stageName string, stageMeta map[string]int
 			"repo_url":     hubRepoURL,
 			"branch":       branch,
 			"chart_path":   "charts/" + kubernetesResourcesChart,
+			"chart_values": chartValues,
 			"values_path":  relPaths[0],
 			"release_name": "networkpolicy",
 			"server":       server,
@@ -934,7 +974,7 @@ func renderInfraDefaultMode(stageDir, stageName string, stageMeta map[string]int
 				if source != nil {
 					helm, _ := source["helm"].(map[string]interface{})
 					if helm != nil {
-						helm["valueFiles"] = relPaths
+						helm["valueFiles"] = append([]string{chartValues}, relPaths...)
 					}
 				}
 			}
@@ -1135,7 +1175,7 @@ func helmTemplateToDir(chartDir, releaseName, namespace string, valuesData map[s
 }
 
 func renderApp(stageDir, appDir, outputBase, stageProject string, cliOverrides map[string]interface{}) (string, string, map[string]interface{}) {
-	appMeta := loadYAML(filepath.Join(appDir, "app.yaml"))
+	appMeta := loadYAML(yamlPath(filepath.Join(appDir, "app")))
 	instanceName := filepath.Base(appDir)
 	chartName, _ := appMeta["chartName"].(string)
 	namespace, _ := appMeta["namespace"].(string)
@@ -1157,8 +1197,8 @@ func renderApp(stageDir, appDir, outputBase, stageProject string, cliOverrides m
 	}
 
 	appOutput := filepath.Join(outputBase, renderedAppsDir, instanceName)
-	envValues := filepath.Join(appDir, "values.yaml")
-	secretsFile := filepath.Join(appDir, "secrets.yaml")
+	envValues := yamlPath(filepath.Join(appDir, "values"))
+	secretsFile := yamlPath(filepath.Join(appDir, "secrets"))
 	hasSOPS := false
 	if _, err := os.Stat(secretsFile); err == nil {
 		hasSOPS = true
@@ -1290,6 +1330,11 @@ func generateAppApplicationHelm(appMeta map[string]interface{}, stageMeta map[st
 		syncWave = "10"
 	}
 
+	valuesExt := ".yaml"
+	if _, err := os.Stat(filepath.Join(repoRoot, "projects", stage, "apps", instanceName, "values.yml")); err == nil {
+		valuesExt = ".yml"
+	}
+	chartDirAbs := filepath.Join(chartsDir, chartName)
 	app, err := renderTemplate("application-helm.yaml", map[string]string{
 		"name":         stage + "-" + instanceName,
 		"sync_wave":    syncWave,
@@ -1299,7 +1344,8 @@ func generateAppApplicationHelm(appMeta map[string]interface{}, stageMeta map[st
 		"repo_url":     repoURL,
 		"branch":       branch,
 		"chart_path":   "charts/" + chartName,
-		"values_path":  "../../projects/" + stage + "/apps/" + instanceName + "/values.yaml",
+		"chart_values": chartValuesFile(chartDirAbs),
+		"values_path":  "../../projects/" + stage + "/apps/" + instanceName + "/values" + valuesExt,
 		"release_name": instanceName,
 		"server":       server,
 		"namespace":    namespace,
@@ -1485,7 +1531,7 @@ func toStringSlice(v []interface{}) []string {
 }
 
 func renderStage(stageDir, appFilter string, fullRender bool, cliOverrides map[string]interface{}) {
-	stageMeta := loadYAML(filepath.Join(stageDir, "main.yaml"))
+	stageMeta := loadYAML(yamlPath(filepath.Join(stageDir, "main")))
 	stageName := filepath.Base(stageDir)
 	validateConfig(stageMeta)
 	repoURL, _ := stageMeta["repoUrl"].(string)
@@ -1612,9 +1658,9 @@ func renderStage(stageDir, appFilter string, fullRender bool, cliOverrides map[s
 		}
 
 		for _, ad := range appDirs {
-			appMetaFile := loadYAML(filepath.Join(ad, "app.yaml"))
+			appMetaFile := loadYAML(yamlPath(filepath.Join(ad, "app")))
 			instanceName := filepath.Base(ad)
-			secretsFile := filepath.Join(ad, "secrets.yaml")
+			secretsFile := yamlPath(filepath.Join(ad, "secrets"))
 			hasSOPS := false
 			if _, err := os.Stat(secretsFile); err == nil {
 				hasSOPS = true
@@ -1833,7 +1879,7 @@ func createStage(initTemplate map[string]interface{}, stageName string) {
 		fmt.Printf("  Created: %s/\n", rel)
 	}
 
-	stageFile := filepath.Join(stageDir, "main.yaml")
+	stageFile := yamlPath(filepath.Join(stageDir, "main"))
 	if _, err := os.Stat(stageFile); err == nil {
 		rel, _ := filepath.Rel(repoRoot, stageFile)
 		fmt.Printf("  Exists: %s\n", rel)
