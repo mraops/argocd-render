@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.3.6
+
+### Fixed
+- AppProject-файлы (`rendered/argocd/projects/<stage>.yaml`) больше не затираются при рендере нескольких стейджей: `renderProject` перестал вызывать `os.RemoveAll` для общей директории проектов в каждом стейдже. Раньше выживал только AppProject последнего отрендеренного стейджа
+- Корректный выбор свежесгенерированного файла проекта (из kind-поддиректории) вместо уже записанных проектов соседних стейджей — устранена гонка, когда имя внутри YAML не совпадало с именем файла
+- AppProject генерируется **для каждого стейджа всегда** — убран жёсткий триггер по `namespaceResourceWhitelist`/`sourceRepos` в `main.yaml`. Раньше стейдж без этих полей не получал AppProject
+- Гарантирован непустой `sourceRepos`: если `repoUrl` стейджа пуст, берётся `argocd.root-repo-url` из config (шаблон `project.yaml` рендерится только при непустом `sourceRepos`)
+- Cleanup устаревших AppProject: при рендере всех стейджей удаляются `projects/<stage>.yaml` для стейджей, которых больше нет. Работает в обоих режимах, не срабатывает при фильтре `--stage`
+- Корневой AppProject не генерируется: стейдж, имя которого **точно совпадает** со значением `argocd.root-project` из config, пропускается в `renderProject` (ни AppProject, ни Application CR для него не создаются). Устаревший файл такого стейджа также удаляется cleanup
+- Убрана генерация Application CR `*-project.yaml` для каждого стейджа: раскатка AppProject теперь лежит на едином bootstrap-Application (deployed ansible'ом через multi-source на `rendered/argocd/projects`). AppProject-файлы в `rendered/argocd/projects/<stage>.yaml` продолжают генерироваться как обычно. Устаревшие `*-project.yaml` удаляются cleanup, т.к. `project` больше не попадает в `activeApps`
+
 ## v0.3.5
 
 ### Fixed

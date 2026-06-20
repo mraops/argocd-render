@@ -550,14 +550,15 @@ func discoverInfraFilesRecursive(dir string) []string {
 	return files
 }
 
-func renderProject(stageDir, stageName string, stageMeta map[string]interface{}, argocdAppsDir string) bool {
+func renderProject(stageDir, stageName string, stageMeta map[string]interface{}) bool {
 	chartDir := filepath.Join(chartsDir, kubernetesResourcesChart)
 	if _, err := os.Stat(filepath.Join(chartDir, "Chart.yaml")); os.IsNotExist(err) {
 		return false
 	}
 
-	// Only render project if main.yaml has project definition fields
-	if stageMeta["namespaceResourceWhitelist"] == nil && stageMeta["sourceRepos"] == nil {
+	// The stage matching argocd.root-project is the root AppProject itself —
+	// it already exists in the cluster, so we must not render it.
+	if rootProject := getCfgString("argocd", "root-project"); rootProject != "" && stageName == rootProject {
 		return false
 	}
 
@@ -583,6 +584,11 @@ func renderProject(stageDir, stageName string, stageMeta map[string]interface{},
 	}
 
 	repoURL, _ := stageMeta["repoUrl"].(string)
+	// The project template renders only when sourceRepos is non-empty. Fall back
+	// to the hub repo URL so every stage gets a project even without repoUrl.
+	if repoURL == "" {
+		repoURL = getCfgString("argocd", "root-repo-url")
+	}
 	projValues := map[string]interface{}{
 		"projectName":                stageName,
 		"projectNamespace":           ns,
@@ -595,16 +601,23 @@ func renderProject(stageDir, stageName string, stageMeta map[string]interface{},
 	}
 
 	projOutDir := filepath.Join(repoRoot, "rendered", "argocd", "projects")
-	os.RemoveAll(projOutDir)
+	os.MkdirAll(projOutDir, 0755)
 	if _, err := helmTemplateToDir(chartDir, "project", ns, projValues, projOutDir); err != nil {
 		fmt.Fprintf(os.Stderr, "  ERROR render project: %v\n", err)
 		return false
 	}
 
-	// helmTemplateToDir creates subdirs by kind — move file to projects/<stage>.yaml
+	// helmTemplateToDir writes into a kind subdir (projects/<kind>/<name>.yaml).
+	// Pick up the freshly rendered file from any subdir and move it to
+	// projects/<stage>.yaml. Only consider files inside subdirs — files lying
+	// directly in projOutDir are previously rendered projects of other stages
+	// and must not be mistaken for this stage's output.
 	projFile := ""
 	filepath.WalkDir(projOutDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
+			return nil
+		}
+		if filepath.Dir(path) == projOutDir {
 			return nil
 		}
 		if strings.HasSuffix(d.Name(), ".yaml") || strings.HasSuffix(d.Name(), ".yml") {
@@ -615,45 +628,16 @@ func renderProject(stageDir, stageName string, stageMeta map[string]interface{},
 	if projFile != "" {
 		targetPath := filepath.Join(projOutDir, stageName+".yaml")
 		data, _ := os.ReadFile(projFile)
-		os.RemoveAll(projOutDir)
-		os.MkdirAll(projOutDir, 0755)
+		os.RemoveAll(filepath.Dir(projFile))
 		if err := os.WriteFile(targetPath, data, 0644); err != nil {
 			fmt.Fprintf(os.Stderr, "  WARNING write project %s: %v\n", stageName, err)
 		}
 	}
 
-	// Generate Application CR — directory source, root-repo-url
-	hubRepoURL := getCfgString("argocd", "root-repo-url")
-	if hubRepoURL == "" {
-		hubRepoURL = repoURL
-	}
-	rootProject := getCfgString("argocd", "root-project")
-	if rootProject == "" {
-		rootProject = ""
-	}
-
-	app, _ := renderTemplate("application.yaml", map[string]string{
-		"name":      stageName + "-project",
-		"sync_wave": "-10",
-		"stage":     stageName,
-		"app_name":  "project",
-		"project":   rootProject,
-		"repo_url":  hubRepoURL,
-		"branch":    "master",
-		"path":      "rendered/argocd/projects",
-		"server":    server,
-		"namespace": ns,
-	})
-	if app != nil {
-		applyAppSettings(app, map[string]interface{}{
-			"application": map[string]interface{}{
-				"prune": false, "selfHeal": true,
-				"syncOptions": []interface{}{"ServerSideApply=true"},
-				"finalizers":  []interface{}{},
-			},
-		})
-		writeYAML(filepath.Join(argocdAppsDir, stageName+"-project.yaml"), app)
-	}
+	// No per-stage Application CR for the project: a single bootstrap Application
+	// (deployed out-of-band by ansible, pointing at rendered/argocd/projects) rolls
+	// out all AppProjects, so generating a *-project.yaml Application per stage
+	// would duplicate that responsibility.
 	fmt.Printf("  Rendered project (%d destinations)\n", len(destinations))
 	return true
 }
@@ -1553,7 +1537,7 @@ func renderStage(stageDir, appFilter string, fullRender bool, cliOverrides map[s
 	repoEntries := extractRepos(stageMeta)
 
 	// Project — always rendered as static YAML (both modes)
-	projectActive := renderProject(stageDir, stageName, stageMeta, argocdAppsDir)
+	renderProject(stageDir, stageName, stageMeta)
 
 	if fullRender {
 		// FULL RENDER MODE
@@ -1608,9 +1592,6 @@ func renderStage(stageDir, appFilter string, fullRender bool, cliOverrides map[s
 		// Generate Application YAMLs (directory source)
 		fmt.Println("  Generating Applications...")
 		activeApps := make(map[string]bool)
-		if projectActive {
-			activeApps["project"] = true
-		}
 		for _, r := range results {
 			if r.status == "rendered" && r.meta != nil {
 				activeApps[r.name] = true
@@ -1653,9 +1634,6 @@ func renderStage(stageDir, appFilter string, fullRender bool, cliOverrides map[s
 
 		fmt.Println("  Generating Applications...")
 		activeApps := make(map[string]bool)
-		if projectActive {
-			activeApps["project"] = true
-		}
 
 		for _, ad := range appDirs {
 			appMetaFile := loadYAML(yamlPath(filepath.Join(ad, "app")))
@@ -2192,6 +2170,28 @@ func main() {
 				if !matched {
 					os.Remove(filepath.Join(appsDir, e.Name()))
 					fmt.Printf("  Removed: applications/%s\n", e.Name())
+				}
+			}
+		}
+	}
+
+	// Cleanup stale AppProject files (rendered/argocd/projects/<stage>.yaml) when
+	// rendering all stages. Projects render per-stage into a shared directory, so a
+	// stage that lost its project trigger (or was removed) must have its file pruned.
+	// Runs in both default and full-render modes, only when no --stage filter is set.
+	if stage == "" {
+		projectsDir := filepath.Join(repoRoot, "rendered", "argocd", "projects")
+		if entries, err := os.ReadDir(projectsDir); err == nil {
+			// The root-project stage must never have a generated AppProject file.
+			rootProject := getCfgString("argocd", "root-project")
+			for _, e := range entries {
+				if !strings.HasSuffix(e.Name(), ".yaml") {
+					continue
+				}
+				stageName := strings.TrimSuffix(e.Name(), ".yaml")
+				if !activeStageNames[stageName] || (rootProject != "" && stageName == rootProject) {
+					os.Remove(filepath.Join(projectsDir, e.Name()))
+					fmt.Printf("  Removed: projects/%s\n", e.Name())
 				}
 			}
 		}
