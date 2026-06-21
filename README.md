@@ -164,21 +164,23 @@ projects/example/
 
 ### SOPS шифрование/дешифрование
 
+`--encrypt`/`--decrypt` обрабатывают **только файлы секретов** — те, чьё имя начинается на `secrets` (`secrets.yaml`, `secrets.yml`, `secrets-db.yaml` и т.п.). Остальные YAML (`app.yaml`, `values.yaml`, `.sops.yaml`) не трогаются — они читаются рендером как открытые метаданные. Это позволяет безопасно запускать шифрование на всей папке приложения.
+
 ```bash
-# Зашифровать все YAML в директории
+# Зашифровать все secrets* в папке приложения (несколько файлов сразу)
 argocd-render --encrypt projects/production/apps/myapp/
 
 # Зашифровать один файл
 argocd-render --encrypt projects/production/apps/myapp/secrets.yaml
 
-# Расшифровать
-argocd-render --decrypt rendered/production/
+# Расшифровать все secrets* в папке приложения
+argocd-render --decrypt projects/production/apps/myapp/
 
 # Расшифровать один файл
-argocd-render --decrypt secrets.yaml
+argocd-render --decrypt projects/production/apps/myapp/secrets.yaml
 ```
 
-Файлы определяются как SOPS-зашифрованные по наличию поля `sops:` в YAML.
+Файлы определяются как SOPS-зашифрованные по наличию поля `sops:` в YAML. Правила шифрования (age-ключ) берутся из `.sops.yaml` в корне репозитория.
 
 ### Версия
 

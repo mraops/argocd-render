@@ -1880,15 +1880,19 @@ func createStage(initTemplate map[string]interface{}, stageName string) {
 
 func collectYAMLFiles(root string) []string {
 	var files []string
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		absRoot = root
+	}
 	info, err := os.Stat(root)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %s is not a valid file or directory\n", root)
 		os.Exit(1)
 	}
 	if !info.IsDir() {
-		return []string{root}
+		return []string{absRoot}
 	}
-	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -1904,41 +1908,72 @@ func collectYAMLFiles(root string) []string {
 	return files
 }
 
+// isSecretsFile reports whether a file is a secrets file eligible for SOPS
+// encryption/decryption. Only files whose basename starts with "secrets" are
+// considered, so encrypting an app directory never touches app.yaml/values.yaml
+// (which render reads as plain metadata) or the .sops.yaml rules file itself.
+// Multiple secrets files per directory are supported (secrets.yaml, secrets-db.yml, ...).
+func isSecretsFile(path string) bool {
+	base := filepath.Base(path)
+	if !strings.HasPrefix(base, "secrets") {
+		return false
+	}
+	if base == ".sops.yaml" || base == ".sops.yml" {
+		return false
+	}
+	ext := filepath.Ext(base)
+	return ext == ".yaml" || ext == ".yml"
+}
+
 func cmdEncrypt(path string) {
 	files := collectYAMLFiles(path)
+	found := false
 	for _, f := range files {
+		if !isSecretsFile(f) {
+			continue
+		}
+		found = true
+		rel, _ := filepath.Rel(repoRoot, f)
 		if isSOPSEncrypted(f) {
-			rel, _ := filepath.Rel(repoRoot, f)
 			fmt.Printf("  Skip (already encrypted): %s\n", rel)
 			continue
 		}
 		cmd := exec.Command("sops", "-e", "-i", "--input-type", "yaml", "--output-type", "yaml", f)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  ERROR %s: %s\n", filepath.Base(f), strings.TrimSpace(string(out)))
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %s\n", rel, strings.TrimSpace(string(out)))
 			continue
 		}
-		rel, _ := filepath.Rel(repoRoot, f)
 		fmt.Printf("  Encrypted: %s\n", rel)
+	}
+	if !found {
+		fmt.Println("  No secrets* files found")
 	}
 }
 
 func cmdDecrypt(path string) {
 	files := collectYAMLFiles(path)
+	found := false
 	for _, f := range files {
+		if !isSecretsFile(f) {
+			continue
+		}
+		found = true
+		rel, _ := filepath.Rel(repoRoot, f)
 		if !isSOPSEncrypted(f) {
-			rel, _ := filepath.Rel(repoRoot, f)
 			fmt.Printf("  Skip (not encrypted): %s\n", rel)
 			continue
 		}
 		cmd := exec.Command("sops", "-d", "-i", "--input-type", "yaml", "--output-type", "yaml", f)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  ERROR %s: %s\n", filepath.Base(f), strings.TrimSpace(string(out)))
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %s\n", rel, strings.TrimSpace(string(out)))
 			continue
 		}
-		rel, _ := filepath.Rel(repoRoot, f)
 		fmt.Printf("  Decrypted: %s\n", rel)
+	}
+	if !found {
+		fmt.Println("  No secrets* files found")
 	}
 }
 
@@ -2228,8 +2263,8 @@ func newFlagSet(name string) *flag.FlagSet {
 		fmt.Fprintf(os.Stderr, "  %s --init-config                      Create projects/root-project.yaml\n", name)
 		fmt.Fprintf(os.Stderr, "  %s --full-render                      Full render to raw YAML\n", name)
 		fmt.Fprintf(os.Stderr, "  %s --set image.tag=v1.0 --set replicas=3\n", name)
-		fmt.Fprintf(os.Stderr, "  %s --encrypt secrets/                 Encrypt YAML files\n", name)
-		fmt.Fprintf(os.Stderr, "  %s --decrypt rendered/                Decrypt SOPS files\n", name)
+		fmt.Fprintf(os.Stderr, "  %s --encrypt projects/<stage>/apps/<app>  Encrypt secrets* files (SOPS/age)\n", name)
+		fmt.Fprintf(os.Stderr, "  %s --decrypt projects/<stage>/apps/<app>  Decrypt secrets* files\n", name)
 	}
 	return fs
 }
