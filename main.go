@@ -595,8 +595,10 @@ func renderProject(stageDir, stageName string, stageMeta map[string]interface{})
 		"description":                stageMeta["description"],
 		"sourceRepos":                []interface{}{repoURL},
 		"destinations":               destinations,
-		"clusterResourceWhitelist":   []interface{}{},
+		"clusterResourceWhitelist":   stageMeta["clusterResourceWhitelist"],
+		"clusterResourceBlacklist":   stageMeta["clusterResourceBlacklist"],
 		"namespaceResourceWhitelist": stageMeta["namespaceResourceWhitelist"],
+		"namespaceResourceBlacklist": stageMeta["namespaceResourceBlacklist"],
 		"sourceNamespaces":           sourceNS,
 	}
 
