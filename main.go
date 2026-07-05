@@ -37,8 +37,14 @@ var (
 
 	// Default Application settings (overridable per-app via app.yaml)
 	defaultFinalizers = []string{"resources-finalizer.argocd.argoproj.io"}
-	defaultPrune      = true
-	defaultSelfHeal   = true
+	// defaultPrune is the default for apps, rbac and networkpolicy. Namespaces
+	// override this to false (see applyAppSettings callers) because pruning a
+	// namespace deletes everything inside it.
+	defaultPrune    = true
+	defaultSelfHeal = true
+	// pruneFalse is passed to applyAppSettings to pin prune=false for resources
+	// where automated pruning is destructive (namespaces).
+	pruneFalse = false
 	defaultSyncOptions = []string{"ServerSideApply=true", "RespectIgnoreDifferences=true"}
 
 	kubernetesResourcesChart = "kubernetes-resources"
@@ -708,7 +714,7 @@ func renderInfraFullRender(stageDir, outputBase, stageName string, stageMeta map
 			"namespace": nsName,
 		})
 		if app != nil {
-			applyAppSettings(app, nsConfig)
+			applyAppSettings(app, nsConfig, &pruneFalse)
 			argocdAppsDir := filepath.Join(repoRoot, "rendered", "argocd", "applications")
 			writeYAML(filepath.Join(argocdAppsDir, appName+".yaml"), app)
 		}
@@ -757,7 +763,7 @@ func renderInfraFullRender(stageDir, outputBase, stageName string, stageMeta map
 					"namespace": "default",
 				})
 				if app != nil {
-					applyAppSettings(app, rbacConfig)
+					applyAppSettings(app, rbacConfig, nil)
 					argocdAppsDir := filepath.Join(repoRoot, "rendered", "argocd", "applications")
 					writeYAML(filepath.Join(argocdAppsDir, appName+".yaml"), app)
 				}
@@ -797,7 +803,7 @@ func renderInfraFullRender(stageDir, outputBase, stageName string, stageMeta map
 					"namespace": "default",
 				})
 				if app != nil {
-					applyAppSettings(app, npConfig)
+					applyAppSettings(app, npConfig, nil)
 					argocdAppsDir := filepath.Join(repoRoot, "rendered", "argocd", "applications")
 					writeYAML(filepath.Join(argocdAppsDir, appName+".yaml"), app)
 				}
@@ -868,7 +874,7 @@ func renderInfraDefaultMode(stageDir, stageName string, stageMeta map[string]int
 			"namespace":     nsName,
 		})
 		if app != nil {
-			applyAppSettings(app, nsConfig)
+			applyAppSettings(app, nsConfig, &pruneFalse)
 			writeYAML(filepath.Join(argocdAppsDir, appName+".yaml"), app)
 		}
 		fmt.Printf("  Application: namespace/%s (helm)\n", nsName)
@@ -917,7 +923,7 @@ func renderInfraDefaultMode(stageDir, stageName string, stageMeta map[string]int
 			}
 		}
 		if app != nil {
-			applyAppSettings(app, rbacConfig)
+			applyAppSettings(app, rbacConfig, nil)
 			writeYAML(filepath.Join(argocdAppsDir, appName+".yaml"), app)
 		}
 		fmt.Printf("  Application: rbac (helm, %d files)\n", len(rbacFiles))
@@ -966,7 +972,7 @@ func renderInfraDefaultMode(stageDir, stageName string, stageMeta map[string]int
 			}
 		}
 		if app != nil {
-			applyAppSettings(app, npConfig)
+			applyAppSettings(app, npConfig, nil)
 			writeYAML(filepath.Join(argocdAppsDir, appName+".yaml"), app)
 		}
 		fmt.Printf("  Application: networkpolicy (helm, %d files)\n", len(npFiles))
@@ -1296,7 +1302,7 @@ func generateAppApplication(appMeta map[string]interface{}, stageMeta map[string
 	}
 
 
-		applyAppSettings(app, appMeta)
+		applyAppSettings(app, appMeta, nil)
 
 	return app
 }
@@ -1349,7 +1355,7 @@ func generateAppApplicationHelm(appMeta map[string]interface{}, stageMeta map[st
 	}
 
 
-		applyAppSettings(app, appMeta)
+		applyAppSettings(app, appMeta, nil)
 
 	return app
 }
@@ -1396,7 +1402,7 @@ func generateSOPSApplication(appMeta map[string]interface{}, stageMeta map[strin
 	}
 
 
-		applyAppSettings(app, appMeta)
+		applyAppSettings(app, appMeta, nil)
 
 	return app
 }
@@ -1455,15 +1461,17 @@ func generateRepoApplication(stageName string, stageMeta map[string]interface{},
 			"selfHeal": true,
 			"syncOptions": []interface{}{"ServerSideApply=true"},
 		},
-	})
+	}, nil)
 	return app
 }
 
 // --- Stage rendering ---
 
 // applyAppSettings adds finalizers, syncPolicy, syncOptions to Application CR
-// based on app.yaml "application" section with defaults.
-func applyAppSettings(app map[string]interface{}, appMeta map[string]interface{}) {
+// based on app.yaml "application" section. defaultPruneOverride lets the caller
+// pin a per-category prune default (e.g. namespaces → false); an explicit
+// app.yaml "prune" always wins over it.
+func applyAppSettings(app map[string]interface{}, appMeta map[string]interface{}, defaultPruneOverride *bool) {
 	// Read "application" overrides from app.yaml
 	appConf, _ := appMeta["application"].(map[string]interface{})
 
@@ -1481,6 +1489,9 @@ func applyAppSettings(app map[string]interface{}, appMeta map[string]interface{}
 
 	// SyncPolicy
 	prune := defaultPrune
+	if defaultPruneOverride != nil {
+		prune = *defaultPruneOverride
+	}
 	selfHeal := defaultSelfHeal
 	syncOpts := defaultSyncOptions
 

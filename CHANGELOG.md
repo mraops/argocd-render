@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.3.9
+
+### Changed
+- Дефолт `prune` теперь зависит от типа ресурса. Раньше все Application CR получали `prune: true`, что опасно для инфраструктуры — automated prune удаляет любой ресурс, пропавший из манифеста (PVC, Secret, namespace со всем содержимым). Теперь:
+  - **namespace** → `prune: false` (защита от удаления неймспейса с данными)
+  - **приложения** (`apps/`) → `prune: true` (как и раньше — устаревшие ресурсы очищаются)
+  - **rbac, networkpolicy** → `prune: true` (без изменений)
+  - **repo bootstrap** → `prune: false` (хардкод, без изменений)
+- Явное значение `prune` в `app.yaml` всегда перекрывает дефолт — приоритет конфига сохранён
+- `applyAppSettings` получил третий параметр `defaultPruneOverride *bool` для пиннинга дефолта per-category
+
+## v0.3.8
+
+### Added
+- AppProject передаёт все resource whitelist/blacklist (`clusterResourceWhitelist`, `clusterResourceBlacklist`, `namespaceResourceWhitelist`, `namespaceResourceBlacklist`) из `main.yaml` stage в шаблон проекта
+
 ## v0.3.7
 
 ### Changed

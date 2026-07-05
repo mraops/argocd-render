@@ -322,7 +322,7 @@ syncWave: "-10"
 chartName: universal-helm-chart
 namespace: production
 application:
-  prune: false                                  # по умолчанию true
+  prune: false                                  # по умолчанию зависит от типа ресурса (см. ниже)
   selfHeal: true                                # по умолчанию true
   syncOptions:                                  # по умолчанию [ServerSideApply=true, RespectIgnoreDifferences=true]
     - ServerSideApply=true
@@ -331,18 +331,29 @@ application:
     - custom-finalizer.example.com
 ```
 
-Дефолтные значения:
+Дефолт `prune` зависит от типа ресурса:
+
+| Тип ресурса | `prune` по умолчанию | Причина |
+|-------------|---------------------|---------|
+| namespace | `false` | prune удалит неймспейс со всем содержимым (PVC, Secret, Deployment) |
+| приложение (`apps/`) | `true` | устаревшие ресурсы очищаются при обновлениях релиза |
+| rbac | `true` | аккумулируется из всех файлов, синхронизация должна сходиться |
+| networkpolicy | `true` | устаревшие политики должны удаляться |
+| repo bootstrap | `false` | хардкод, не должен пруниться |
+
+Остальные дефолты:
 
 | Параметр | По умолчанию |
 |----------|-------------|
-| `prune` | `true` |
 | `selfHeal` | `true` |
 | `syncOptions` | `["ServerSideApply=true", "RespectIgnoreDifferences=true"]` |
 | `finalizers` | `["resources-finalizer.argocd.argoproj.io"]` |
 
+Явное значение `prune` в `app.yaml` всегда перекрывает дефолт.
+
 Примеры:
 
-Отключить prune для критичного приложения:
+Отключить prune для критичного приложения (по умолчанию для apps это `true`):
 ```yaml
 chartName: universal-helm-chart
 namespace: production
@@ -390,17 +401,17 @@ projects/<stage>/
 Формат `app.yaml` для инфры — тот же, что и для приложений:
 
 ```yaml
-prune: false
+prune: true
 selfHeal: true
 syncOptions:
   - ServerSideApply=true
 finalizers: []
 ```
 
-Пример — отключить prune для networkpolicy:
+Пример — включить prune для namespace (по умолчанию `false`, т.к. prune неймспейса удаляет всё внутри):
 ```yaml
-# projects/production/networkpolicy/app.yaml
-prune: false
+# projects/production/namespaces/app.yaml
+prune: true
 ```
 
 Пример — кастомные finalizers для rbac:
@@ -415,7 +426,7 @@ syncOptions:
 
 | Параметр | По умолчанию |
 |----------|-------------|
-| `prune` | `true` |
+| `prune` | `false` для namespaces, `true` для rbac/networkpolicy |
 | `selfHeal` | `true` |
 | `syncOptions` | `["ServerSideApply=true", "RespectIgnoreDifferences=true"]` |
 | `finalizers` | `["resources-finalizer.argocd.argoproj.io"]` |
