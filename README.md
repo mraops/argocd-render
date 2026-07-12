@@ -522,27 +522,32 @@ project:
 |------|----------|
 | `make current-version` | Показать текущую версию |
 | `make tag-list` | Показать последние 10 тегов |
-| `make patch` | Создать тег v*.*.+1 (0.1.0 → 0.1.1) |
-| `make minor` | Создать тег v*.+1.0 (0.1.0 → 0.2.0) |
-| `make major` | Создать тег v+1.0.0 (0.1.0 → 1.0.0) |
-| `make release` | patch + build |
+| `make release-patch` | Создать тег v*.*.+1 (0.3.10 → 0.3.11) |
+| `make release-minor` | Создать тег v*.+1.0 (0.3.10 → 0.4.0) |
+| `make release-major` | Создать тег v+1.0.0 (0.3.10 → 1.0.0) |
+| `make release` | Алиас для `release-patch` |
+| `make patch` / `make minor` / `make major` | Обратная совместимость — алиасы для `release-*` |
+
+Перед релизом — добавить запись в `CHANGELOG.md` с заголовком той версии, которую даст бамп, чтобы коммит и тег совпали. `make release-*` коммитит, тегает и пушит; refuses если тег уже существует (защита от двойного релиза).
 
 Пример workflow:
 ```bash
-# Закоммитить изменения
-git add . && git commit -m "feat: new feature"
+# 1. Поправить код и CHANGELOG (заголовок = будущая версия)
+#    например "## v0.3.11" для release-patch
 
-# Поднять patch-версию и собрать
+# 2. Поднять patch-версию
 make release
-# Created tag v0.1.1
-# Released v0.1.1
+# Released v0.3.11
 
-# Или вручную
-make minor      # v0.1.1 → v0.2.0
-make major      # v0.2.0 → v1.0.0
+# Или minor/major
+make release-minor   # v0.3.11 → v0.4.0
+make release-major   # v0.4.0 → v1.0.0
 
-# Собрать Docker-образ с версией из тега
+# 3. Собрать Docker-образ с версией из тега
 make image TAG=$(make current-version) push
+
+# Кастомное сообщение коммита релиза
+make release MSG="release v0.3.11: fix helm dep cache"
 ```
 
 ### Переменные

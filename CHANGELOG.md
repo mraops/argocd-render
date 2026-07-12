@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.3.11
+
+### Changed
+- Makefile: секция версионирования переписана. Общая функция `_release` (commit + tag + push с guard'ом на существующий тег) вместо трёх копий логики. Добавлены явные цели `release-patch` / `release-minor` / `release-major`; `release` = алиас для `release-patch`; `patch`/`minor`/`major` сохранены как алиасы для обратной совместимости. Защита от двойного релиза: если тег уже существует — `make release-*` падает с понятной ошибкой
+
 ## v0.3.10
 
 ### Added

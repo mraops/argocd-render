@@ -13,7 +13,7 @@ _CUR_PATCH = $(shell git tag -l --sort=-v:refname | head -1 | sed -n 's/v[0-9]*\
 
 .PHONY: build build-linux-amd64 build-linux-arm64 build-darwin-arm64 build-all \
         image image-arm64 image-all push push-arm64 push-all \
-        patch minor major release \
+        patch minor major release release-patch release-minor release-major \
         tag-list current-version clean tidy
 
 # --- Build ---
@@ -58,7 +58,16 @@ push-arm64:
 push-all: push push-arm64
 
 # --- Git versioning ---
-# Usage: make release MSG="feat: new feature"
+# Bump the version, commit (with CHANGELOG + any staged work), tag and push.
+# Usage:
+#   make release             # patch bump (v0.3.10 -> v0.3.11)
+#   make release-patch       # same as release
+#   make release-minor       # minor bump (v0.3.10 -> v0.4.0)
+#   make release-major       # major bump (v0.3.10 -> v1.0.0)
+#   make release MSG="feat: ..."   # custom commit message
+#
+# Set CHANGELOG.md heading to the version the bump will produce BEFORE running
+# release, so the committed CHANGELOG and the tag match.
 
 current-version:
 	@echo $(VERSION)
@@ -66,31 +75,41 @@ current-version:
 tag-list:
 	@git tag -l --sort=-v:refname | head -10
 
-patch:
-	$(eval NEW := v$(_CUR_MAJOR).$(_CUR_MINOR).$(shell echo $$(($(_CUR_PATCH)+1))))
-	$(eval MSG := $(or $(MSG),release $(NEW)))
-	@git add -A && git commit -m "$(MSG)" || true
-	@git tag $(NEW)
-	@git push && git push --tags
-	@echo "Released $(NEW)"
+# _release is the shared commit+tag+push engine. Callers set $(NEW) first.
+# It refuses to run when the next tag already exists (e.g. CHANGELOG written
+# ahead but tag created manually) to avoid a confusing double-release.
+define _release
+	@new='$(NEW)'; \
+	if [ -z "$$new" ]; then echo "ERROR: NEW is empty (no previous tag to bump?)"; exit 1; fi; \
+	if git rev-parse "$$new" >/dev/null 2>&1; then \
+		echo "ERROR: tag $$new already exists; bump again or delete it first"; exit 1; \
+	fi; \
+	msg='$(or $(MSG),release '"$$new"')'; \
+	git add -A && git commit -m "$$msg" || true; \
+	git tag "$$new"; \
+	git push && git push --tags; \
+	echo "Released $$new"
+endef
 
-minor:
-	$(eval NEW := v$(_CUR_MAJOR).$(shell echo $$(($(_CUR_MINOR)+1))).0)
-	$(eval MSG := $(or $(MSG),release $(NEW)))
-	@git add -A && git commit -m "$(MSG)" || true
-	@git tag $(NEW)
-	@git push && git push --tags
-	@echo "Released $(NEW)"
+release-patch: NEW = v$(_CUR_MAJOR).$(_CUR_MINOR).$(shell echo $$(($(_CUR_PATCH)+1)))
+release-patch:
+	$(call _release)
 
-major:
-	$(eval NEW := v$(shell echo $$(($(_CUR_MAJOR)+1))).0.0)
-	$(eval MSG := $(or $(MSG),release $(NEW)))
-	@git add -A && git commit -m "$(MSG)" || true
-	@git tag $(NEW)
-	@git push && git push --tags
-	@echo "Released $(NEW)"
+release-minor: NEW = v$(_CUR_MAJOR).$(shell echo $$(($(_CUR_MINOR)+1))).0
+release-minor:
+	$(call _release)
 
-release: patch
+release-major: NEW = v$(shell echo $$(($(_CUR_MAJOR)+1))).0.0
+release-major:
+	$(call _release)
+
+# Backwards-compatible aliases.
+patch: release-patch
+minor: release-minor
+major: release-major
+
+# Default release = patch bump.
+release: release-patch
 	@:
 
 # --- Clean ---
