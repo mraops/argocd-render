@@ -182,6 +182,21 @@ argocd-render --decrypt projects/production/apps/myapp/secrets.yaml
 
 Файлы определяются как SOPS-зашифрованные по наличию поля `sops:` в YAML. Правила шифрования (age-ключ) берутся из `.sops.yaml` в корне репозитория.
 
+### Очистка кэша и артефактов
+
+```bash
+argocd-render --clean
+```
+
+Удаляет артефакты `helm dep` и кэш рендера, чтобы следующий рендер пересобрал всё с нуля. Удаляет по каждому чарту:
+- `charts/<chart>/charts/*.tgz` — vendored dependencies
+- `charts/<chart>/Chart.lock` — helm dependency lockfile
+- `charts/<chart>/.dep.md5` — кэш-маркер argocd-render (хеш для skip-логики `helm dep build`)
+
+И глобальный кэш `.render-cache/` (helm cache/config/data).
+
+`--clean` — автономная команда: выполняет очистку и завершается, рендер не запускается. Удобно, когда `helm dep build` тащит устаревшие зависимости или кэш повредился.
+
 ### Версия
 
 ```bash
