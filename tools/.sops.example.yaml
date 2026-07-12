@@ -1,0 +1,10 @@
+creation_rules:
+  - path_regex: ^vault/.*\.ya?ml$
+    age: >-
+      <AGE_PUBLIC_KEY>
+    mac_only_encrypted: true
+
+  - path_regex: secrets.*\.ya?ml$
+    age: >-
+      <AGE_PUBLIC_KEY>
+    mac_only_encrypted: true

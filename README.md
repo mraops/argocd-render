@@ -182,6 +182,47 @@ argocd-render --decrypt projects/production/apps/myapp/secrets.yaml
 
 Файлы определяются как SOPS-зашифрованные по наличию поля `sops:` в YAML. Правила шифрования (age-ключ) берутся из `.sops.yaml` в корне репозитория.
 
+### CMP sidecar и приватные репозитории
+
+Директория `tools/` содержит образ CMP sidecar для `argocd-repo-server` и утилиты для рендера приложений с SOPS-секретами прямо в кластере:
+
+```
+tools/
+├── Dockerfile.sops-cmp      # образ CMP sidecar (argocd + sops + helm + helm-secrets + repo-sync)
+├── sops-generate.sh         # CMP-генератор: helm secrets template / sops -d
+├── repo-sync/               # Go CLI: ArgoCD repository-Secret'ы → helm repositories.yaml
+├── repo-rbac.example.yaml   # RBAC для repo-sync (ServiceAccount + Role + RoleBinding)
+├── Makefile                 # локальные encrypt/decrypt через sops
+└── .sops.example.yaml       # пример .sops.yaml
+```
+
+#### Приватные helm-зависимости в CMP sidecar
+
+ArgoCD v3 не прокидывает repository-credentials в CMP sidecar (нативно — только Git через `provideGitCreds`). Поэтому `helm dep build` в плагине падает на приватных helm-репозиториях. `tools/repo-sync` закрывает этот провал: читает Secret'ы с label `argocd.argoproj.io/secret-type=repository` (`type: helm`) через in-cluster Kubernetes API и пишет helm-совместимый `repositories.yaml`.
+
+**Сборка образа:**
+```bash
+docker build -f tools/Dockerfile.sops-cmp tools/ -t argocd-sops-cmp:latest
+```
+
+**Подключение:**
+1. Применить RBAC: `kubectl apply -f tools/repo-rbac.example.yaml` (в namespace ArgoCD).
+2. Подключить ServiceAccount к repo-server через `repoServer.serviceAccount.name` в ArgoCD helm-values.
+3. Настроить CMP sidecar на использование образа (ConfigManagementPlugin manifest — в репозитории ArgoCD-инсталляции).
+
+**Переменные repo-sync** (env в контейнере sidecar):
+
+| Переменная | По умолчанию | Описание |
+|-----------|--------------|----------|
+| `CMP_REPO_SYNC_TTL` | `300` | Секунды жизни кэша `repositories.yaml`. В течение TTL повторные запуски пропускаются |
+| `CMP_REPO_SYNC_OUT` | `/tmp/helm-config/helm/repositories.yaml` | Путь к выходному файлу |
+| `CMP_REPO_SYNC_NAMESPACE` | из serviceaccount | Namespace для чтения Secret'ов |
+| `CMP_REPO_SYNC_INSECURE` | `0` | `1`/`true` — отключить проверку TLS (debug) |
+
+Credentials не покидают pod (`emptyDir`, uid 999, файл `0600`) и не логируются. Покрытие: HTTP/HTTPS helm-репо. OCI-registry и Git-сабчарты не покрываются (последние — через нативный `provideGitCreds`).
+
+Подробнее — в `tools/repo-sync/README.md`.
+
 ### Версия
 
 ```bash
