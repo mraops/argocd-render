@@ -25,13 +25,13 @@ import (
 var embeddedFS embed.FS
 
 var (
-	repoRoot   string
-	cacheDir   string
-	helmHome   string
-	chartsDir  string
-	configFile string
-	debugMode  bool
-	appVersion = "dev"
+	repoRoot        string
+	cacheDir        string
+	helmHome        string
+	chartsDir       string
+	configFile      string
+	debugMode       bool
+	appVersion      = "dev"
 	stageAppsDir    = "apps"
 	renderedAppsDir = "apps"
 
@@ -44,7 +44,7 @@ var (
 	defaultSelfHeal = true
 	// pruneFalse is passed to applyAppSettings to pin prune=false for resources
 	// where automated pruning is destructive (namespaces).
-	pruneFalse = false
+	pruneFalse         = false
 	defaultSyncOptions = []string{"ServerSideApply=true", "RespectIgnoreDifferences=true"}
 
 	kubernetesResourcesChart = "kubernetes-resources"
@@ -497,6 +497,31 @@ func extractRepos(stageMeta map[string]interface{}) []map[string]interface{} {
 	return repos
 }
 
+// collectSourceRepos builds the AppProject spec.sourceRepos list. It always
+// starts with repoURL (the stage's git repo, with fallback handled by the
+// caller) and appends plain URL strings from main.yaml's projectSourceRepos.
+// projectSourceRepos is a list of helm-repository URLs (plain strings, not the
+// {url,branch,path} objects used by the `sourceRepos` field for bootstrap
+// Applications). Entries equal to repoURL are de-duplicated so the AppProject
+// never lists the same URL twice.
+func collectSourceRepos(repoURL string, stageMeta map[string]interface{}) []interface{} {
+	out := []interface{}{repoURL}
+	seen := map[string]bool{repoURL: true}
+	extras, _ := stageMeta["projectSourceRepos"].([]interface{})
+	for _, e := range extras {
+		s, ok := e.(string)
+		if !ok || s == "" {
+			continue
+		}
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
 // --- Infrastructure ---
 
 func fileStem(path string) string {
@@ -599,7 +624,7 @@ func renderProject(stageDir, stageName string, stageMeta map[string]interface{})
 		"projectName":                stageName,
 		"projectNamespace":           ns,
 		"description":                stageMeta["description"],
-		"sourceRepos":                []interface{}{repoURL},
+		"sourceRepos":                collectSourceRepos(repoURL, stageMeta),
 		"destinations":               destinations,
 		"clusterResourceWhitelist":   stageMeta["clusterResourceWhitelist"],
 		"clusterResourceBlacklist":   stageMeta["clusterResourceBlacklist"],
@@ -859,19 +884,19 @@ func renderInfraDefaultMode(stageDir, stageName string, stageMeta map[string]int
 		active["namespace-"+nsName] = true
 		chartDirAbs := filepath.Join(chartsDir, kubernetesResourcesChart)
 		app, _ := renderTemplate("application-helm.yaml", map[string]string{
-			"name":          appName,
-			"sync_wave":     "0",
-			"stage":         stageName,
-			"app_name":      "namespace-" + nsName,
-			"project":       rootProject,
-			"repo_url":      hubRepoURL,
-			"branch":        branch,
-			"chart_path":    "charts/" + kubernetesResourcesChart,
-			"chart_values":  chartValuesFile(chartDirAbs),
-			"values_path":   yamlChartRelPath(chartDirAbs, f),
-			"release_name":  nsName,
-			"server":        server,
-			"namespace":     nsName,
+			"name":         appName,
+			"sync_wave":    "0",
+			"stage":        stageName,
+			"app_name":     "namespace-" + nsName,
+			"project":      rootProject,
+			"repo_url":     hubRepoURL,
+			"branch":       branch,
+			"chart_path":   "charts/" + kubernetesResourcesChart,
+			"chart_values": chartValuesFile(chartDirAbs),
+			"values_path":  yamlChartRelPath(chartDirAbs, f),
+			"release_name": nsName,
+			"server":       server,
+			"namespace":    nsName,
 		})
 		if app != nil {
 			applyAppSettings(app, nsConfig, &pruneFalse)
@@ -1287,15 +1312,15 @@ func renderApp(stageDir, appDir, outputBase, stageProject string, cliOverrides m
 	}
 
 	return "rendered", instanceName, map[string]interface{}{
-		"instanceName":     instanceName,
-		"chartName":        chartName,
-		"namespace":        namespace,
-		"project":          project,
-		"stage":            stageName,
+		"instanceName":      instanceName,
+		"chartName":         chartName,
+		"namespace":         namespace,
+		"project":           project,
+		"stage":             stageName,
 		"ignoreDifferences": ignoreDiffs,
-		"hasSops":          hasSOPS,
-		"syncWave":         syncWave,
-		"application":      appMeta["application"],
+		"hasSops":           hasSOPS,
+		"syncWave":          syncWave,
+		"application":       appMeta["application"],
 	}
 }
 
@@ -1344,8 +1369,7 @@ func generateAppApplication(appMeta map[string]interface{}, stageMeta map[string
 		}
 	}
 
-
-		applyAppSettings(app, appMeta, nil)
+	applyAppSettings(app, appMeta, nil)
 
 	return app
 }
@@ -1397,8 +1421,7 @@ func generateAppApplicationHelm(appMeta map[string]interface{}, stageMeta map[st
 		}
 	}
 
-
-		applyAppSettings(app, appMeta, nil)
+	applyAppSettings(app, appMeta, nil)
 
 	return app
 }
@@ -1444,8 +1467,7 @@ func generateSOPSApplication(appMeta map[string]interface{}, stageMeta map[strin
 		}
 	}
 
-
-		applyAppSettings(app, appMeta, nil)
+	applyAppSettings(app, appMeta, nil)
 
 	return app
 }
@@ -1482,16 +1504,16 @@ func generateRepoApplication(stageName string, stageMeta map[string]interface{},
 	}
 
 	app, err := renderTemplate("repo-application.yaml", map[string]string{
-		"name":      repoName + "-bootstrap",
-		"sync_wave": "5",
-		"stage":     stageName,
-		"repo_name": repoName,
-		"project":   stageProject,
-		"repo_url":  repoURL,
-		"branch":    repoBranch,
-		"path":      repoPath,
-		"server":    server,
-		"namespace":      projectNS,
+		"name":               repoName + "-bootstrap",
+		"sync_wave":          "5",
+		"stage":              stageName,
+		"repo_name":          repoName,
+		"project":            stageProject,
+		"repo_url":           repoURL,
+		"branch":             repoBranch,
+		"path":               repoPath,
+		"server":             server,
+		"namespace":          projectNS,
 		"metadata_namespace": projectNS,
 	})
 	if err != nil {
@@ -1500,8 +1522,8 @@ func generateRepoApplication(stageName string, stageMeta map[string]interface{},
 	}
 	applyAppSettings(app, map[string]interface{}{
 		"application": map[string]interface{}{
-			"prune":    false,
-			"selfHeal": true,
+			"prune":       false,
+			"selfHeal":    true,
 			"syncOptions": []interface{}{"ServerSideApply=true"},
 		},
 	}, nil)
@@ -1710,15 +1732,15 @@ func renderStage(stageDir, appFilter string, fullRender bool, cliOverrides map[s
 				syncWave = "10"
 			}
 			meta := map[string]interface{}{
-				"instanceName": instanceName,
-				"chartName":    chartName,
-				"namespace":    namespace,
-				"project":      project,
-				"stage":        stageName,
+				"instanceName":      instanceName,
+				"chartName":         chartName,
+				"namespace":         namespace,
+				"project":           project,
+				"stage":             stageName,
 				"ignoreDifferences": appMetaFile["ignoreDifferences"],
-				"hasSops":      hasSOPS,
-				"syncWave":     syncWave,
-				"application":  appMetaFile["application"],
+				"hasSops":           hasSOPS,
+				"syncWave":          syncWave,
+				"application":       appMetaFile["application"],
 			}
 			activeApps[instanceName] = true
 

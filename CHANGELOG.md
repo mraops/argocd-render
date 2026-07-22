@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.2
+
+### Added
+- main.yaml: поле `projectSourceRepos` — список helm-репозиториев (plain URL-строки), попадающих в AppProject `spec.sourceRepos`. Раньше `sourceRepos` AppProject содержал только `repoUrl` stage; теперь к нему добавляются URLs из `projectSourceRepos` (с дедупликацией). Решает ошибку доступа для Applications на native `source.helm`, зависящих от helm-репозиториев. Не коллидирует с полем `sourceRepos` (git-репо для bootstrap-Applications, формат `{url, branch, path}`)
+
 ## v0.4.1
 
 ### Changed
