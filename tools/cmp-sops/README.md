@@ -80,10 +80,24 @@ helm-secrets декриптит их on-the-fly по content (SOPS MAC), не п
 в поднятый gRPC-дедлайн 200s (`reposerver.repo.server.timeout.seconds`). Guard: только
 если нет предвендоренных `.tgz` в `charts/`. Пути cache/config берёт из ENV
 (`HELM_CACHE_HOME`/`HELM_CONFIG_HOME`) — `repositories.yaml` живёт в
-`/tmp/helm-config/repositories.yaml` (его пишет helm-repo-sync).
+`/tmp/helm-config/repositories-<project>.yaml` (per-project, его пишет helm-repo-sync).
 
-Перед dep build вызывается `helm-repo-sync` (best-effort, non-fatal) — он материализует
-`repositories.yaml` из ArgoCD repository-Secret'ов, чтобы приватные зависимости резолвились.
+Перед dep build вызывается `helm-repo-sync --chart <CHART_DIR>` — он:
+- читает AppProject (`ARGOCD_APP_PROJECT_NAME`) → `spec.sourceRepos` allowlist
+- валидирует `Chart.yaml` dependencies против allowlist (fail-closed при нарушении)
+- материализует `repositories.yaml` только из разрешённых repository-Secret'ов
+- печатает путь к созданному per-project файлу в stdout
+
+`sops-generate.sh` захватывает этот путь и передаёт в `helm dep build --repository-config=<path>`,
+чтобы helm читал именно per-project файл (иначе он ищет дефолтный путь из `HELM_CONFIG_HOME`
+и не находит credentials → 401).
+
+При ошибке dep build `dep_hint()` парсит типичные причины (401/403, no cached repository,
+no repository definition) и выдаёт конкретный cause + fix вместо дампа сырого stderr helm.
+
+Это закрывает sourceRepos bypass, присущий CMP sidecar (credential isolation между
+проектами + блокировка неразрешённых публичных helm-репо в зависимостях). Подробнее —
+в `helm-repo-sync/README.md` (раздел «Security»).
 
 ### Финальный рендер
 

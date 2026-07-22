@@ -208,15 +208,18 @@ docker build tools/cmp-sops/ -t argocd-sops-cmp:latest
 (контекст сборки — `tools/cmp-sops/`, Dockerfile там же)
 
 **Подключение:**
-1. Дать repo-server право читать Secret'ы (для helm-repo-sync) — через блок `repoServer.rbac` в ArgoCD helm-values:
+1. Дать repo-server права (для helm-repo-sync) — через блок `repoServer.rbac` в ArgoCD helm-values:
    ```yaml
    repoServer:
      rbac:
        - apiGroups: [""]
          resources: ["secrets"]
          verbs: ["get", "list"]
+       - apiGroups: ["argoproj.io"]
+         resources: ["appprojects"]
+         verbs: ["get"]
    ```
-   Чарт создаст Role и привяжет её к ServiceAccount repo-server'а. При желании доступ можно сузить через `resourceNames` до конкретных repository-Secret'ов.
+   `secrets` — для чтения repository-Secret'ов (только с label `argocd.argoproj.io/secret-type=repository`). `appprojects` — для чтения `spec.sourceRepos`, по которому helm-repo-sync фильтрует credentials и валидирует Chart.yaml dependencies (см. ниже «Security»). Чарт создаст Role и привяжет её к ServiceAccount repo-server'а.
 2. Настроить CMP sidecar на использование образа (ConfigManagementPlugin manifest — в репозитории ArgoCD-инсталляции).
 
 **Переменные helm-repo-sync** (env в контейнере sidecar):
@@ -224,7 +227,7 @@ docker build tools/cmp-sops/ -t argocd-sops-cmp:latest
 | Переменная | По умолчанию | Описание |
 |-----------|--------------|----------|
 | `CMP_HELM_REPO_SYNC_TTL` | `86400` | Секунды жизни кэша `repositories.yaml`. В течение TTL повторные запуски пропускаются |
-| `CMP_HELM_REPO_SYNC_OUT` | `/tmp/helm-config/repositories.yaml` | Путь к выходному файлу |
+| `CMP_HELM_REPO_SYNC_OUT` | `/tmp/helm-config/repositories-<project>.yaml` | Путь к выходному файлу (по умолчанию per-project; override для debug) |
 | `CMP_HELM_REPO_SYNC_NAMESPACE` | из serviceaccount | Namespace для чтения Secret'ов |
 | `CMP_HELM_REPO_SYNC_INSECURE` | `0` | `1`/`true` — отключить проверку TLS (debug) |
 

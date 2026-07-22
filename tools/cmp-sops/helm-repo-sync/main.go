@@ -27,24 +27,27 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	labelKey    = "argocd.argoproj.io/secret-type"
-	labelValue  = "repository"
-	defaultTTL  = 86400 // seconds
-	defaultOut  = "/tmp/helm-config/repositories.yaml"
-	saTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
-	saCAFile    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-	saNSFile    = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
-	apiHostEnv  = "CMP_HELM_REPO_SYNC_API_HOST"  // default: kubernetes.default.svc
-	ttlEnv      = "CMP_HELM_REPO_SYNC_TTL"       // seconds
-	outEnv      = "CMP_HELM_REPO_SYNC_OUT"       // repositories.yaml path
-	nsEnv       = "CMP_HELM_REPO_SYNC_NAMESPACE" // namespace to read secrets from
-	insecureEnv = "CMP_HELM_REPO_SYNC_INSECURE"  // skip TLS verify (debug only)
+	labelKey       = "argocd.argoproj.io/secret-type"
+	labelValue     = "repository"
+	defaultTTL     = 86400                                   // seconds
+	defaultOutTmpl = "/tmp/helm-config/repositories-%s.yaml" // %s = AppProject name
+	saTokenFile    = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	saCAFile       = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+	saNSFile       = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+	apiHostEnv     = "CMP_HELM_REPO_SYNC_API_HOST"  // default: kubernetes.default.svc
+	ttlEnv         = "CMP_HELM_REPO_SYNC_TTL"       // seconds
+	outEnv         = "CMP_HELM_REPO_SYNC_OUT"       // repositories.yaml path (overrides per-project default)
+	nsEnv          = "CMP_HELM_REPO_SYNC_NAMESPACE" // namespace to read secrets/appprojects from
+	insecureEnv    = "CMP_HELM_REPO_SYNC_INSECURE"  // skip TLS verify (debug only)
+	appProjectEnv  = "ARGOCD_APP_PROJECT_NAME"      // injected by ArgoCD into the CMP plugin process
+	allowAll       = "*"                            // sourceRepos wildcard: permits any URL
 )
 
 // appVersion is injected at build time via -ldflags "-X main.appVersion=...".
@@ -65,6 +68,20 @@ type secretList struct {
 	Items []secret `json:"items"`
 }
 
+// appProject mirrors the fields we need from an ArgoCD AppProject. The
+// project's spec.sourceRepos is the allowlist that credentials and chart
+// dependencies are filtered against. Metadata.ResourceVersion is captured so
+// the cache can be invalidated the instant the AppProject changes (e.g. an
+// operator removes a repo from sourceRepos).
+type appProject struct {
+	Metadata struct {
+		ResourceVersion string `json:"resourceVersion"`
+	} `json:"metadata"`
+	Spec struct {
+		SourceRepos []string `json:"sourceRepos"`
+	} `json:"spec"`
+}
+
 // repoEntry is one line in helm's repositories.yaml.
 type repoEntry struct {
 	Name     string
@@ -75,27 +92,36 @@ type repoEntry struct {
 
 func main() {
 	showVersion := flag.Bool("version", false, "Print version and exit")
+	chartDir := flag.String("chart", "", "Chart directory whose Chart.yaml dependencies are validated against sourceRepos (optional)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Printf("helm-repo-sync %s\n", appVersion)
 		return
 	}
-	if err := run(); err != nil {
+	if err := run(*chartDir); err != nil {
 		fmt.Fprintf(os.Stderr, "[helm-repo-sync] ERROR: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	out := envOr(outEnv, defaultOut)
-
-	// TTL short-circuit: skip the API entirely when the cache is fresh.
-	if ttl := envInt(ttlEnv, defaultTTL); ttl > 0 {
-		if age, ok := fileAge(out); ok && age < time.Duration(ttl)*time.Second {
-			fmt.Fprintf(os.Stderr, "[helm-repo-sync] repositories.yaml up to date (age %ds, ttl %ds)\n", int(age.Seconds()), ttl)
-			return nil
-		}
+func run(chartDir string) error {
+	// Resolve the AppProject first. Without it there is no sourceRepos
+	// allowlist and we fail-closed (refuse to materialize any credentials).
+	project, err := resolveProject()
+	if err != nil {
+		return err
 	}
+
+	// Output path is per-project so apps in different projects never share a
+	// repositories.yaml (each carries only its own allowed credentials).
+	// CMP_HELM_REPO_SYNC_OUT overrides the default template for debugging.
+	out := fmt.Sprintf(defaultOutTmpl, project)
+	if v := envOr(outEnv, ""); v != "" {
+		out = v
+	}
+	// The resourceVersion is cached next to repositories.yaml so the cache can
+	// be invalidated the instant the AppProject changes (not just on TTL).
+	rvFile := out + ".rv"
 
 	token, err := os.ReadFile(saTokenFile)
 	if err != nil {
@@ -112,21 +138,85 @@ func run() error {
 		return fmt.Errorf("build http client: %w", err)
 	}
 
+	// Always fetch the AppProject. This is a small, cheap GET, and it is the
+	// only way to detect sourceRepos changes without waiting for TTL — the whole
+	// point of resourceVersion-based invalidation. Fail-closed on any error.
+	allowed, curRV, err := fetchAppProject(client, host, ns, project, strings.TrimSpace(string(token)))
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[helm-repo-sync] project=%s sourceRepos=%d rv=%s\n", project, len(allowed), curRV)
+
+	// Cache short-circuit: if the AppProject resourceVersion is unchanged AND
+	// the repositories.yaml is still within TTL, skip the Secret list + filter
+	// (the expensive part). An operator editing sourceRepos bumps resourceVersion,
+	// which invalidates this immediately even mid-TTL.
+	if ttl := envInt(ttlEnv, defaultTTL); ttl > 0 {
+		if cachedRV := readRV(rvFile); cachedRV == curRV && cachedRV != "" {
+			if age, ok := fileAge(out); ok && age < time.Duration(ttl)*time.Second {
+				fmt.Fprintf(os.Stderr, "[helm-repo-sync] cache hit (project=%s, rv=%s, age %ds, ttl %ds)\n", project, curRV, int(age.Seconds()), ttl)
+				fmt.Println(out)
+				return nil
+			}
+		}
+	}
+
+	// Validate Chart.yaml dependencies against sourceRepos BEFORE materializing
+	// credentials. Catches public-repo URLs the project doesn't allow.
+	if chartDir != "" {
+		if err := validateChartDeps(chartDir, allowed); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "[helm-repo-sync] Chart.yaml dependencies OK (project=%s)\n", project)
+	}
+
 	secrets, err := listSecrets(client, host, ns, strings.TrimSpace(string(token)))
 	if err != nil {
 		return err
 	}
 
-	entries, skipped := filterSecrets(secrets)
+	entries, skipped := filterSecrets(secrets, allowed)
 	if len(entries) == 0 {
-		// No helm repos configured. Write an empty (but valid) repositories.yaml
-		// so helm sees a well-formed file and we still record the sync timestamp.
-		fmt.Fprintf(os.Stderr, "[helm-repo-sync] no http helm repositories found (%d secrets seen, %d skipped)\n", len(secrets), skipped)
-		return writeRepositories(out, nil, time.Now())
+		// No allowed helm repos. Write an empty (but valid) repositories.yaml so
+		// helm sees a well-formed file and dep build fails clearly on missing
+		// credentials rather than a parse error.
+		fmt.Fprintf(os.Stderr, "[helm-repo-sync] no allowed helm repos for project=%s (%d secrets seen, %d skipped)\n", project, len(secrets), skipped)
+		if err := writeRepositories(out, nil, time.Now()); err != nil {
+			return err
+		}
+		writeRV(rvFile, curRV)
+		fmt.Println(out)
+		return nil
 	}
 
-	fmt.Fprintf(os.Stderr, "[helm-repo-sync] synced %d http helm repos (%d skipped)\n", len(entries), skipped)
-	return writeRepositories(out, entries, time.Now())
+	fmt.Fprintf(os.Stderr, "[helm-repo-sync] synced %d helm repos for project=%s (%d skipped)\n", len(entries), project, skipped)
+	if err := writeRepositories(out, entries, time.Now()); err != nil {
+		return err
+	}
+	writeRV(rvFile, curRV)
+	fmt.Println(out)
+	return nil
+}
+
+// readRV returns the cached AppProject resourceVersion, or "" if absent.
+func readRV(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// writeRV stores the AppProject resourceVersion alongside repositories.yaml so
+// the next run can detect AppProject changes and invalidate the cache. The file
+// holds only the opaque version string (no secrets).
+func writeRV(path, rv string) {
+	if rv == "" {
+		return
+	}
+	dir := filepath.Dir(path)
+	_ = os.MkdirAll(dir, 0700)
+	_ = os.WriteFile(path, []byte(rv), 0600)
 }
 
 // resolveNamespace picks the namespace from env, then the serviceaccount file.
@@ -200,13 +290,71 @@ func listSecrets(client *http.Client, host, ns, token string) ([]secret, error) 
 	return list.Items, nil
 }
 
-// filterSecrets keeps HTTP/HTTPS helm repositories (type: helm, not OCI) and
-// drops git/OCI/invalid entries. The Kubernetes API returns Secret `data`
-// base64-encoded (whether the Secret was created via `data` or `stringData`),
-// so each field is decoded to its plaintext before any comparison or use.
-// A field that fails to decode (should not happen for a well-formed Secret)
-// causes the whole Secret to be skipped with a warning.
-func filterSecrets(items []secret) (entries []repoEntry, skipped int) {
+// resolveProject returns the AppProject name injected by ArgoCD into the CMP
+// plugin process via ARGOCD_APP_PROJECT_NAME. It is required: without a project
+// there is no sourceRepos allowlist to filter against, and we fail-closed.
+func resolveProject() (string, error) {
+	v := os.Getenv(appProjectEnv)
+	if v == "" {
+		return "", fmt.Errorf("%s env is empty; ArgoCD must inject the AppProject name (fail-closed: no allowlist)", appProjectEnv)
+	}
+	return v, nil
+}
+
+// fetchAppProject reads an ArgoCD AppProject and returns its spec.sourceRepos
+// and metadata.resourceVersion. The resourceVersion is used for cache
+// invalidation: when the AppProject changes (e.g. sourceRepos edited), the
+// version bumps and the cache is rebuilt immediately rather than waiting for
+// TTL. Any API error (404, RBAC denial, network) is fatal — fail-closed: an
+// unreadable project means we cannot enforce sourceRepos.
+func fetchAppProject(client *http.Client, host, ns, name, token string) (sourceRepos []string, resourceVersion string, err error) {
+	path := fmt.Sprintf("/apis/argoproj.io/v1alpha1/namespaces/%s/appprojects/%s", ns, name)
+	url := fmt.Sprintf("https://%s%s", host, path)
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("k8s api request for AppProject %s: %w", name, err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("k8s api %s: status %d: %s", path, resp.StatusCode, truncate(body, 512))
+	}
+
+	var proj appProject
+	if err := json.Unmarshal(body, &proj); err != nil {
+		return nil, "", fmt.Errorf("decode AppProject %s: %w", name, err)
+	}
+	return proj.Spec.SourceRepos, proj.Metadata.ResourceVersion, nil
+}
+
+// isAllowed reports whether url is permitted by the sourceRepos allowlist.
+// Matching is exact string equality; the wildcard "*" permits any URL.
+func isAllowed(url string, allowed []string) bool {
+	for _, a := range allowed {
+		if a == allowAll || a == url {
+			return true
+		}
+	}
+	return false
+}
+
+// filterSecrets keeps HTTP/HTTPS helm repositories (type: helm, not OCI) whose
+// URL is permitted by the AppProject sourceRepos allowlist, and drops the rest.
+// The Kubernetes API returns Secret `data` base64-encoded (whether the Secret
+// was created via `data` or `stringData`), so each field is decoded to its
+// plaintext before any comparison or use. A field that fails to decode (should
+// not happen for a well-formed Secret) causes the whole Secret to be skipped
+// with a warning.
+func filterSecrets(items []secret, allowed []string) (entries []repoEntry, skipped int) {
 	for _, s := range items {
 		// Decode every data field from base64. Kubernetes stores all Secret
 		// values base64-encoded in `data`; without this, comparisons like
@@ -257,6 +405,13 @@ func filterSecrets(items []secret) (entries []repoEntry, skipped int) {
 			fmt.Fprintf(os.Stderr, "[helm-repo-sync] skip %s: empty url\n", name)
 			continue
 		}
+		// sourceRepos gate: only materialize credentials for repos the AppProject
+		// explicitly allows. This closes the cross-project credential leak.
+		if !isAllowed(url, allowed) {
+			skipped++
+			fmt.Fprintf(os.Stderr, "[helm-repo-sync] skip %s: url %q not in sourceRepos\n", name, url)
+			continue
+		}
 		entries = append(entries, repoEntry{
 			Name:     name,
 			URL:      url,
@@ -266,6 +421,88 @@ func filterSecrets(items []secret) (entries []repoEntry, skipped int) {
 		fmt.Fprintf(os.Stderr, "[helm-repo-sync] add %s -> %s\n", name, url)
 	}
 	return entries, skipped
+}
+
+// chartDepRepoRe matches a helm dependency repository URL in Chart.yaml, e.g.:
+//   - name: cert-manager
+//     repository: https://charts.jetstack.io
+//   - repository: https://charts.jetstack.io
+//
+// It captures the value (URL or alias like "@myrepo"). We match any indented
+// "repository:" line inside the dependencies block rather than tying it to a
+// preceding "- name:", which is brittle across the formatting variants helm
+// and chart authors use. Local/alias references (starting with "@", "file://",
+// or empty) are ignored — they point at a repo already defined elsewhere.
+var chartDepRepoRe = regexp.MustCompile(`(?m)^[ \t]+(?:-[ \t]*)?repository:[ \t]*(.+?)[ \t]*$`)
+
+// validateChartDeps reads <chartDir>/Chart.yaml and checks that every
+// dependency's repository URL is permitted by the AppProject sourceRepos
+// allowlist. This closes the public-repo bypass: a chart pulling from an
+// unapproved helm repository fails fast instead of fetching it at dep build.
+//
+// Parsing is intentionally lightweight (regexp over lines) to keep the binary
+// stdlib-only — Chart.yaml dependency blocks are simple enough that a full YAML
+// parser adds no value here. Only top-level Chart.yaml dependencies are
+// validated; transitive subchart-of-subchart dependencies are not visible and
+// are a documented limitation.
+func validateChartDeps(chartDir string, allowed []string) error {
+	chartFile := filepath.Join(chartDir, "Chart.yaml")
+	data, err := os.ReadFile(chartFile)
+	if err != nil {
+		// No Chart.yaml → nothing to validate (the caller only runs dep build
+		// when Chart.yaml exists, so this is a defensive no-op).
+		return nil
+	}
+	// Only inspect the dependencies: section. Cut everything before it so the
+	// regexp doesn't match "repository:" keys elsewhere in the file.
+	content := string(data)
+	// Find the top-level "dependencies:" key (a line with no indentation).
+	var block string
+	lines := strings.Split(content, "\n")
+	startIdx := -1
+	for i, line := range lines {
+		if line == "dependencies:" {
+			startIdx = i
+			break
+		}
+	}
+	if startIdx < 0 {
+		return nil // no dependencies block
+	}
+	// Collect lines until the next top-level key (no indentation, not a list
+	// item) — that ends the dependencies list.
+	for _, line := range lines[startIdx:] {
+		if line == "dependencies:" {
+			block += line + "\n"
+			continue
+		}
+		if line == "" {
+			continue
+		}
+		if line[0] != ' ' && line[0] != '\t' && line[0] != '-' {
+			break // next top-level key reached
+		}
+		block += line + "\n"
+	}
+
+	var denied []string
+	for _, m := range chartDepRepoRe.FindAllStringSubmatch(block, -1) {
+		repo := strings.TrimSpace(m[1])
+		// Strip surrounding quotes so quoted aliases ("@myrepo") are handled.
+		repo = strings.Trim(repo, `"'`)
+		// Skip local/alias references: "@alias", "file://./charts/x", empty.
+		// They point at a repo declared elsewhere in the chart, not a remote URL.
+		if repo == "" || strings.HasPrefix(repo, "@") || strings.HasPrefix(repo, "file://") {
+			continue
+		}
+		if !isAllowed(repo, allowed) {
+			denied = append(denied, repo)
+		}
+	}
+	if len(denied) > 0 {
+		return fmt.Errorf("Chart.yaml dependencies reference repos not in sourceRepos: %s", strings.Join(denied, ", "))
+	}
+	return nil
 }
 
 // writeRepositories renders helm's repositories.yaml and writes it atomically.

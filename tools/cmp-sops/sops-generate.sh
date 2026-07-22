@@ -3,6 +3,64 @@ set -e
 
 log() { echo "[sops-cmp] $*" >&2; }
 
+# dep_hint reads /tmp/dep.log (helm dep build stderr) and surfaces actionable
+# hints for the most common failures, instead of dumping helm's verbose output.
+# Each recognized pattern logs a targeted message with a concrete next step;
+# the full log is appended at the end for anything we didn't match.
+dep_hint() {
+    repo_config="$1"
+    [ -f /tmp/dep.log ] || return 0
+    log "ERROR: helm dep build failed after retries. Diagnosing:"
+    matched=0
+
+    # 401/403 on a chart repository index — credentials missing or wrong.
+    if grep -qE '401 Unauthorized|403 Forbidden' /tmp/dep.log; then
+        matched=1
+        # Extract the offending repo URL(s).
+        urls=$(grep -oE 'https?://[^ "]+' /tmp/dep.log | sort -u | grep -vE 'index\.yaml$' || true)
+        log "  cause: authentication failed for a helm repository (401/403)."
+        if [ -n "$urls" ]; then
+            log "  repos: $(echo "$urls" | tr '\n' ' ')"
+        fi
+        log "  fix:   add the repository to ArgoCD Repositories (with username/password)"
+        log "         AND list its URL in the AppProject sourceRepos"
+        log "         (via projectSourceRepos in main.yaml)."
+        log "         helm-repo-sync only materializes creds for repos that are both"
+        log "         registered in ArgoCD AND allowed by sourceRepos."
+    fi
+
+    # "no cached repository for <hash>" — helm couldn't resolve a dependency
+    # because its repository isn't in repositories.yaml at all.
+    if grep -q 'no cached repository for' /tmp/dep.log; then
+        matched=1
+        log "  cause: a Chart.yaml dependency points at a helm repository that is"
+        log "         neither registered in ArgoCD nor in sourceRepos."
+        # Pull the dependency names from Chart.yaml to help identify which one.
+        if [ -f "$CHART_DIR/Chart.yaml" ]; then
+            deps=$(grep -E '^[[:space:]]*-[[:space:]]*name:' "$CHART_DIR/Chart.yaml" | sed 's/.*name:[[:space:]]*//' | tr '\n' ' ')
+            [ -n "$deps" ] && log "  Chart.yaml dependencies: $deps"
+        fi
+        log "  fix:   for each dependency repository, either:"
+        log "         - register it in ArgoCD Repositories + add URL to sourceRepos, or"
+        log "         - vendor the chart into charts/*.tgz (skip dep build)."
+    fi
+
+    # Repository URL not declared anywhere (helm "no repository definition").
+    if grep -q 'no repository definition for' /tmp/dep.log; then
+        matched=1
+        log "  cause: a Chart.yaml dependency uses a repository URL that helm cannot"
+        log "         resolve. It may be missing from repositories.yaml."
+        log "  fix:   ensure the repository URL in Chart.yaml matches exactly the URL"
+        log "         in ArgoCD Repositories / sourceRepos (no trailing slash, same scheme)."
+    fi
+
+    if [ "$matched" -ne 1 ]; then
+        log "  (unrecognized error — raw helm output below)"
+    fi
+    # Always show the (flattened) raw log so nothing is hidden.
+    log "  raw: $(tr '\n' ' ' < /tmp/dep.log | sed 's/[[:space:]]\+/ /g')"
+}
+
 # DEBUG: dump VALUES_ENV to verify it reaches the plugin from source.plugin.env.
 # ArgoCD exposes Application source.plugin.env vars with the ARGOCD_ENV_ prefix.
 # Brackets reveal trailing/leading whitespace; len catches empty/missing var.
@@ -135,28 +193,44 @@ $1"
     # (server/controller.repo.server.timeout.seconds = 200s in values.yml).
     if [ -f "$CHART_DIR/Chart.yaml" ] && ! ls "$CHART_DIR/charts/"*.tgz >/dev/null 2>&1; then
         # Sync ArgoCD repository Secrets into helm's repositories.yaml so private
-        # helm dependencies resolve. helm-repo-sync is idempotent with TTL caching
-        # (CMP_HELM_REPO_SYNC_TTL, default 300s). Failure is non-fatal: helm dep build
-        # may still succeed with public repos or a previously written file.
+        # helm dependencies resolve. helm-repo-sync filters credentials by the
+        # AppProject sourceRepos allowlist (ARGOCD_APP_PROJECT_NAME) and validates
+        # Chart.yaml dependencies against it (fail-closed on policy violation).
+        # Idempotent with TTL caching (CMP_HELM_REPO_SYNC_TTL, default 300s).
+        # It prints the per-project repositories.yaml path to stdout; we capture
+        # it and pass to helm dep build via --repository-config so helm reads the
+        # right file (otherwise it looks at the default HELM_CONFIG_HOME path).
+        REPO_CONFIG=""
         if command -v helm-repo-sync >/dev/null 2>&1; then
-            helm-repo-sync || log "WARNING: helm-repo-sync failed (continuing with existing repositories.yaml)"
+            if REPO_CONFIG=$(helm-repo-sync --chart "$CHART_DIR" 2>>/tmp/repo-sync.err); then :; else
+                log "WARNING: helm-repo-sync failed (continuing with default repositories.yaml)"
+                log "  $(tr '\n' ' ' </tmp/repo-sync.err 2>/dev/null)"
+            fi
         fi
+        # Build the --repository-config flag only when helm-repo-sync returned a path.
+        DEP_REPO_FLAG=""
+        if [ -n "$REPO_CONFIG" ]; then
+            DEP_REPO_FLAG="--repository-config=$REPO_CONFIG"
+        fi
+
         log "building helm dependencies"
         DEP_ATTEMPTS=3
         DEP_TIMEOUT=60
         dep_ok=0
         i=1
         while [ "$i" -le "$DEP_ATTEMPTS" ]; do
-            if timeout "${DEP_TIMEOUT}s" helm dep build "$CHART_DIR" \
+            if timeout "${DEP_TIMEOUT}s" helm dep build "$CHART_DIR" $DEP_REPO_FLAG \
                 >/tmp/dep.log 2>&1; then
                 dep_ok=1
                 break
             fi
-            log "helm dep build attempt $i/$DEP_ATTEMPTS failed: $(tr '\n' ' ' </tmp/dep.log 2>/dev/null)"
+            log "helm dep build attempt $i/$DEP_ATTEMPTS failed"
             i=$((i + 1))
         done
         if [ "$dep_ok" -ne 1 ]; then
-            log "ERROR: helm dep build failed after $DEP_ATTEMPTS attempts"
+            # Parse the most common failure causes out of helm's verbose stderr
+            # and surface a actionable message instead of the raw log dump.
+            dep_hint "$REPO_CONFIG"
             exit 1
         fi
     fi

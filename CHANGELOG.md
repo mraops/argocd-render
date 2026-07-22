@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.4.3
+
+### Fixed
+- `helm dep build` падал с `401 Unauthorized` / `no cached repository` несмотря на то, что helm-repo-sync успешно материализовал credentials. Корень: после перехода на per-project кэш helm dep build читал дефолтный путь и не находил per-project файл. Теперь helm-repo-sync печатает путь в stdout, а `sops-generate.sh` передаёт его в `helm dep build --repository-config=<path>`
+- Информативные ошибки `helm dep build`: `dep_hint()` парсит типичные причины (401/403, no cached repository, no repository definition) и выдаёт конкретный cause + fix вместо дампа сырого stderr helm
+- **Кэш не инвалидировался при изменении `sourceRepos`** (TTL до 24ч). Оператор убирал репо из AppProject, но приложение продолжало деплоиться со старыми credentials до истечения TTL. Теперь кэш инвалидируется мгновенно по `resourceVersion` AppProject: helm-repo-sync хранит `.rv` файл рядом с repositories.yaml; если resourceVersion AppProject изменился — полный rebuild, даже если TTL не истёк. AppProject GET выполняется всегда (fail-closed при сбое)
+
+### Security
+- helm-repo-sync: фильтрация repository-Secret'ов по AppProject `spec.sourceRepos`. Раньше читались все repository-Secret'ы cluster-wide (credential leak: приложение проекта A получало доступ к приватным helm-репо проекта B); теперь материализуются только credentials репозиториев, разрешённых в AppProject текущего приложения (`ARGOCD_APP_PROJECT_NAME`). Per-project кэш `repositories-<project>.yaml` изолирует проекты
+- helm-repo-sync: валидация `Chart.yaml` dependencies против sourceRepos (флаг `--chart`). Если в `dependencies:` найден helm-репо URL, не разрешённый в AppProject (включая публичные) — helm-repo-sync падает (fail-closed), dep build не запускается. Закрывает bypass, присущий CMP sidecar (раньше `helm dep build` тянул любой URL из Chart.yaml без проверки)
+- helm-repo-sync: fail-closed при отсутствии AppProject, пустом `sourceRepos` или ошибке K8s API (нет allowlist → нет credentials)
+
+### Changed
+- RBAC helm-repo-sync: +`get appprojects` в namespace ArgoCD (для чтения `spec.sourceRepos`)
+- `sops-generate.sh` передаёт `--chart "$CHART_DIR"` в helm-repo-sync
+- Кэш `repositories.yaml` стал per-project (`/tmp/helm-config/repositories-<project>.yaml`)
+- Matching URL — точное совпадение; спецзначение `*` разрешает любой URL
+
+### Limitations
+- Транзитивные subchart-зависимости не валидируются (не видны в верхнем Chart.yaml). Для полного контроля используйте vendored зависимости (`charts/*.tgz`)
+- Devops должен прописать `sourceRepos` во все AppProject, чьи приложения используют helm-зависимости (через `projectSourceRepos` в main.yaml argocd-render, см. v0.4.2)
+
 ## v0.4.2
 
 ### Added
