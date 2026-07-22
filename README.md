@@ -182,6 +182,56 @@ argocd-render --decrypt projects/production/apps/myapp/secrets.yaml
 
 Файлы определяются как SOPS-зашифрованные по наличию поля `sops:` в YAML. Правила шифрования (age-ключ) берутся из `.sops.yaml` в корне репозитория.
 
+### CMP sidecar и приватные репозитории
+
+Директория `tools/` содержит образ CMP sidecar для `argocd-repo-server` и утилиты для рендера приложений с SOPS-секретами прямо в кластере:
+
+```
+tools/
+├── cmp-sops/                # образ CMP sidecar
+│   ├── Dockerfile           # argocd + sops + helm + helm-secrets + helm-repo-sync
+│   ├── sops-generate.sh     # CMP-генератор: helm secrets template / sops -d
+│   └── helm-repo-sync/      # Go CLI: ArgoCD repository-Secret'ы → helm repositories.yaml
+└── sops/                    # утилиты локального шифрования
+    ├── Makefile             # make encrypt/decrypt (sops)
+    └── .sops.example.yaml   # пример .sops.yaml
+```
+
+#### Приватные helm-зависимости в CMP sidecar
+
+ArgoCD v3 не прокидывает repository-credentials в CMP sidecar (нативно — только Git через `provideGitCreds`). Поэтому `helm dep build` в плагине падает на приватных helm-репозиториях. `tools/cmp-sops/helm-repo-sync` закрывает этот провал: читает Secret'ы с label `argocd.argoproj.io/secret-type=repository` (`type: helm`) через in-cluster Kubernetes API и пишет helm-совместимый `repositories.yaml`.
+
+**Сборка образа:**
+```bash
+docker build tools/cmp-sops/ -t argocd-sops-cmp:latest
+```
+(контекст сборки — `tools/cmp-sops/`, Dockerfile там же)
+
+**Подключение:**
+1. Дать repo-server право читать Secret'ы (для helm-repo-sync) — через блок `repoServer.rbac` в ArgoCD helm-values:
+   ```yaml
+   repoServer:
+     rbac:
+       - apiGroups: [""]
+         resources: ["secrets"]
+         verbs: ["get", "list"]
+   ```
+   Чарт создаст Role и привяжет её к ServiceAccount repo-server'а. При желании доступ можно сузить через `resourceNames` до конкретных repository-Secret'ов.
+2. Настроить CMP sidecar на использование образа (ConfigManagementPlugin manifest — в репозитории ArgoCD-инсталляции).
+
+**Переменные helm-repo-sync** (env в контейнере sidecar):
+
+| Переменная | По умолчанию | Описание |
+|-----------|--------------|----------|
+| `CMP_HELM_REPO_SYNC_TTL` | `86400` | Секунды жизни кэша `repositories.yaml`. В течение TTL повторные запуски пропускаются |
+| `CMP_HELM_REPO_SYNC_OUT` | `/tmp/helm-config/repositories.yaml` | Путь к выходному файлу |
+| `CMP_HELM_REPO_SYNC_NAMESPACE` | из serviceaccount | Namespace для чтения Secret'ов |
+| `CMP_HELM_REPO_SYNC_INSECURE` | `0` | `1`/`true` — отключить проверку TLS (debug) |
+
+Credentials не покидают pod (`emptyDir`, uid 999, файл `0600`) и не логируются. Покрытие: HTTP/HTTPS helm-репо. OCI-registry и Git-сабчарты не покрываются (последние — через нативный `provideGitCreds`).
+
+Подробнее — в `tools/cmp-sops/helm-repo-sync/README.md`.
+
 ### Очистка кэша и артефактов
 
 ```bash
