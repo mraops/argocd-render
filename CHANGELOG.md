@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.1
+
+### Changed
+- `make release` теперь читает целевую версию из верхней записи `CHANGELOG.md` (`## vX.Y.Z`), а не делает patch-bump по умолчанию. Тег и CHANGELOG больше не могут рассинхронизироваться (корень повторявшейся проблемы с лишними тегами). Защиты: отказ если тег уже существует, отказ если CHANGELOG-версия не больше текущего тега, интерактивное подтверждение `[y/N]` (`CONFIRM=1` для CI). Явные `make release-patch`/`-minor`/`-major` сохранены как escape hatch для принудительного бампа
+
+### Added
+- CI: `helm-repo-sync` (CMP sidecar tool) собирается в релизе наравне с `argocd-render` — три платформы (linux/amd64, linux/arm64, darwin/arm64), артефакты `.tar.gz` + `.sha256` попадают в тот же GitHub Release. Кэш setup-go отключён (helm-repo-sync — отдельный go-модуль без общего `go.sum` с корнем)
+- Имена артефактов теперь включают версию: `argocd-render-v0.4.1-linux-amd64.tar.gz`, `helm-repo-sync-v0.4.1-linux-amd64.tar.gz` (раньше версии в имени не было)
+- `helm-repo-sync --version` — выводит версию (инъектируется через `-ldflags -X main.appVersion`, как в `argocd-render`)
+
 ## v0.4.0
 
 ### Added

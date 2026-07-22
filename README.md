@@ -568,36 +568,42 @@ project:
 
 ### Версионирование
 
+`make release` читает целевую версию **из верхней записи CHANGELOG.md** (`## vX.Y.Z`) — так тег и CHANGELOG всегда согласованы. Защиты: отказ если тег уже существует, отказ если версия не больше текущей, интерактивное подтверждение `[y/N]` (или `CONFIRM=1` для CI).
+
 | Цель | Описание |
 |------|----------|
 | `make current-version` | Показать текущую версию |
 | `make tag-list` | Показать последние 10 тегов |
-| `make release-patch` | Создать тег v*.*.+1 (0.3.10 → 0.3.11) |
-| `make release-minor` | Создать тег v*.+1.0 (0.3.10 → 0.4.0) |
-| `make release-major` | Создать тег v+1.0.0 (0.3.10 → 1.0.0) |
-| `make release` | Алиас для `release-patch` |
+| `make release` | Релиз по версии из верхи CHANGELOG.md (рекомендуется) |
+| `make release-patch` | Принудительный patch-bump v0.3.10 → v0.3.11 |
+| `make release-minor` | Принудительный minor-bump v0.3.10 → v0.4.0 |
+| `make release-major` | Принудительный major-bump v0.3.10 → v1.0.0 |
 | `make patch` / `make minor` / `make major` | Обратная совместимость — алиасы для `release-*` |
-
-Перед релизом — добавить запись в `CHANGELOG.md` с заголовком той версии, которую даст бамп, чтобы коммит и тег совпали. `make release-*` коммитит, тегает и пушит; refuses если тег уже существует (защита от двойного релиза).
 
 Пример workflow:
 ```bash
-# 1. Поправить код и CHANGELOG (заголовок = будущая версия)
-#    например "## v0.3.11" для release-patch
-
-# 2. Поднять patch-версию
+# 1. Поправить код и добавить запись в CHANGELOG.md:
+#       ## v0.4.1
+#       ### Fixed
+#       - ...
 make release
-# Released v0.3.11
+# current: v0.4.0
+# release: v0.4.1
+# action:  commit + tag v0.4.1 + push (branch and tag)
+# Proceed? [y/N] y
+# Released v0.4.1
 
-# Или minor/major
-make release-minor   # v0.3.11 → v0.4.0
-make release-major   # v0.4.0 → v1.0.0
-
-# 3. Собрать Docker-образ с версией из тега
-make image TAG=$(make current-version) push
+# Для CI (без подтверждения)
+make release CONFIRM=1
 
 # Кастомное сообщение коммита релиза
-make release MSG="release v0.3.11: fix helm dep cache"
+make release MSG="release v0.4.1: fix helm dep cache"
+
+# Принудительный бамп (CHANGELOG не обновлён / нужен нестандартный шаг)
+make release-minor   # v0.4.0 → v0.5.0
+
+# Собрать Docker-образ с версией из тега
+make image TAG=$(make current-version) push
 ```
 
 ### Переменные

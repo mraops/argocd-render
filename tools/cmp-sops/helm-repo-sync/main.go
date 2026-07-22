@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -46,6 +47,10 @@ const (
 	insecureEnv = "CMP_HELM_REPO_SYNC_INSECURE"  // skip TLS verify (debug only)
 )
 
+// appVersion is injected at build time via -ldflags "-X main.appVersion=...".
+// Defaults to "dev" for local builds; CI stamps it with the git tag.
+var appVersion = "dev"
+
 // secret mirrors the fields we need from a Kubernetes Secret.
 type secret struct {
 	Metadata struct {
@@ -69,6 +74,12 @@ type repoEntry struct {
 }
 
 func main() {
+	showVersion := flag.Bool("version", false, "Print version and exit")
+	flag.Parse()
+	if *showVersion {
+		fmt.Printf("helm-repo-sync %s\n", appVersion)
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "[helm-repo-sync] ERROR: %v\n", err)
 		os.Exit(1)

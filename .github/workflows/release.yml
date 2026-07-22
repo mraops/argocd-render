@@ -10,26 +10,53 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.os }}/${{ matrix.arch }}
+    name: Build ${{ matrix.binary }} ${{ matrix.os }}/${{ matrix.arch }}
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
+        binary: [argocd-render, helm-repo-sync]
         include:
-          - os: linux
+          # argocd-render: CLI tool, distributed for linux + macOS
+          - binary: argocd-render
+            os: linux
             arch: amd64
-          - os: linux
+            src: .
+          - binary: argocd-render
+            os: linux
             arch: arm64
-          - os: darwin
+            src: .
+          - binary: argocd-render
+            os: darwin
             arch: arm64
+            src: .
+          # helm-repo-sync: runs inside the CMP sidecar (linux); also ship
+          # darwin/arm64 for local testing on Apple Silicon.
+          - binary: helm-repo-sync
+            os: linux
+            arch: amd64
+            src: tools/cmp-sops/helm-repo-sync
+          - binary: helm-repo-sync
+            os: linux
+            arch: arm64
+            src: tools/cmp-sops/helm-repo-sync
+          - binary: helm-repo-sync
+            os: darwin
+            arch: arm64
+            src: tools/cmp-sops/helm-repo-sync
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
-          cache: true
+          # helm-repo-sync is a separate go module; disable the default
+          # go.sum cache key so setup-go doesn't fail when the module under
+          # tools/ has no lockfile matching the root.
+          cache: false
 
       - name: Build
+        working-directory: ${{ matrix.src }}
         env:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
@@ -38,20 +65,23 @@ jobs:
           VERSION=${GITHUB_REF_NAME}
           mkdir -p build
           go build -ldflags "-s -w -X main.appVersion=${VERSION}" \
-            -o "build/argocd-render-${{ matrix.os }}-${{ matrix.arch }}" .
+            -o "build/${{ matrix.binary }}-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}" .
 
       - name: Compress
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
           cd build
-          tar -czf "argocd-render-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" "argocd-render-${{ matrix.os }}-${{ matrix.arch }}"
-          shasum -a 256 "argocd-render-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" > "argocd-render-${{ matrix.os }}-${{ matrix.arch }}.tar.gz.sha256"
+          ASSET="${{ matrix.binary }}-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
+          tar -czf "${ASSET}.tar.gz" "${ASSET}"
+          shasum -a 256 "${ASSET}.tar.gz" > "${ASSET}.tar.gz.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: argocd-render-${{ matrix.os }}-${{ matrix.arch }}
+          name: ${{ matrix.binary }}-${{ matrix.os }}-${{ matrix.arch }}
           path: |
-            build/argocd-render-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
-            build/argocd-render-${{ matrix.os }}-${{ matrix.arch }}.tar.gz.sha256
+            build/${{ matrix.binary }}-*-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+            build/${{ matrix.binary }}-*-${{ matrix.os }}-${{ matrix.arch }}.tar.gz.sha256
 
   release:
     name: Publish release
