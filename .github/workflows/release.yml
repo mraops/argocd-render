@@ -64,15 +64,17 @@ jobs:
           VERSION=${GITHUB_REF_NAME}
           mkdir -p build
           go build -ldflags "-s -w -X main.appVersion=${VERSION}" \
-            -o "build/${{ matrix.binary }}-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}" .
+            -o "build/${{ matrix.binary }}" .
 
       - name: Compress
         working-directory: ${{ matrix.src }}
         env:
           VERSION: ${{ github.ref_name }}
         run: |
+          # Archive name carries the version; the binary inside does not, so
+          # unpacking yields a clean "<binary>" executable.
           ASSET="${{ matrix.binary }}-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
-          tar -czf "build/${ASSET}.tar.gz" -C build "${ASSET}"
+          tar -czf "build/${ASSET}.tar.gz" -C build "${{ matrix.binary }}"
           shasum -a 256 "build/${ASSET}.tar.gz" > "build/${ASSET}.tar.gz.sha256"
 
       - uses: actions/upload-artifact@v4
