@@ -3,10 +3,10 @@ set -e
 
 log() { echo "[sops-cmp] $*" >&2; }
 
-# DEBUG: dump APP_ENV to verify it reaches the plugin from source.plugin.env.
+# DEBUG: dump VALUES_ENV to verify it reaches the plugin from source.plugin.env.
 # ArgoCD exposes Application source.plugin.env vars with the ARGOCD_ENV_ prefix.
 # Brackets reveal trailing/leading whitespace; len catches empty/missing var.
-log "DEBUG: ARGOCD_ENV_APP_ENV=[${ARGOCD_ENV_APP_ENV}] (len=${#ARGOCD_ENV_APP_ENV})"
+log "DEBUG: ARGOCD_ENV_VALUES_ENV=[${ARGOCD_ENV_VALUES_ENV}] (len=${#ARGOCD_ENV_VALUES_ENV})"
 
 # --- Mode detection (by files present in cwd = source.path of the Application) ---
 #   app.yaml   -> argocd-render mode (chart lives at $REPO_ROOT/charts/<chartName>;
@@ -61,16 +61,16 @@ if [ -f "app.yaml" ] || [ -f "Chart.yaml" ]; then
     # ============================================================
     # Build the -f flag list.
     # helm merges -f left-to-right (later overrides earlier).
-    # Two modes based on $ARGOCD_ENV_APP_ENV:
+    # Two modes based on $ARGOCD_ENV_VALUES_ENV:
     #
-    # APP_ENV set   (multi-env, universal helm projects):
+    # VALUES_ENV set   (multi-env, universal helm projects):
     #   values.yaml | values.yml       (base defaults, optional)
-    #   values-<APP_ENV>.yaml|yml      (env override, optional)
-    #   secrets-<APP_ENV>.yaml|yml     (env secrets, SOPS, optional)
+    #   values-<VALUES_ENV>.yaml|yml      (env override, optional)
+    #   secrets-<VALUES_ENV>.yaml|yml     (env secrets, SOPS, optional)
     #   → only the matching env suffix is picked; other values-*/secrets-*
     #     are ignored.
     #
-    # APP_ENV unset (argocd-render legacy layout):
+    # VALUES_ENV unset (single-env):
     #   values.yaml | values.yml       (optional)
     #   secrets*.yaml / secrets*.yml   (all of them, sorted; helm-secrets
     #     decrypts on the fly by naming convention)
@@ -88,21 +88,21 @@ $1"
         fi
     }
 
-    if [ -n "$ARGOCD_ENV_APP_ENV" ]; then
-        log "multi-env mode: APP_ENV=$ARGOCD_ENV_APP_ENV"
+    if [ -n "$ARGOCD_ENV_VALUES_ENV" ]; then
+        log "multi-env mode: VALUES_ENV=$ARGOCD_ENV_VALUES_ENV"
         # base values
         add_src "values.yaml" || add_src "values.yml"
         # env values
-        add_src "values-${ARGOCD_ENV_APP_ENV}.yaml" || true
-        add_src "values-${ARGOCD_ENV_APP_ENV}.yml"  || true
+        add_src "values-${ARGOCD_ENV_VALUES_ENV}.yaml" || true
+        add_src "values-${ARGOCD_ENV_VALUES_ENV}.yml"  || true
         # env secrets (helm-secrets decrypts by naming convention)
-        add_src "secrets-${ARGOCD_ENV_APP_ENV}.yaml" || true
-        add_src "secrets-${ARGOCD_ENV_APP_ENV}.yml"  || true
+        add_src "secrets-${ARGOCD_ENV_VALUES_ENV}.yaml" || true
+        add_src "secrets-${ARGOCD_ENV_VALUES_ENV}.yml"  || true
         if [ -z "$SOURCES" ]; then
-            log "WARNING: APP_ENV=$ARGOCD_ENV_APP_ENV but no values/secrets found for it"
+            log "WARNING: VALUES_ENV=$ARGOCD_ENV_VALUES_ENV but no values/secrets found for it"
         fi
     else
-        # legacy: base values + all secrets*
+        # single-env: base values + all secrets*
         add_src "values.yaml" || add_src "values.yml"
         [ -n "$SOURCES" ] || log "WARNING: no values.yaml/values.yml found; rendering with secrets only (if any)"
 
@@ -135,11 +135,11 @@ $1"
     # (server/controller.repo.server.timeout.seconds = 200s in values.yml).
     if [ -f "$CHART_DIR/Chart.yaml" ] && ! ls "$CHART_DIR/charts/"*.tgz >/dev/null 2>&1; then
         # Sync ArgoCD repository Secrets into helm's repositories.yaml so private
-        # helm dependencies resolve. repo-sync is idempotent with TTL caching
-        # (CMP_REPO_SYNC_TTL, default 300s). Failure is non-fatal: helm dep build
+        # helm dependencies resolve. helm-repo-sync is idempotent with TTL caching
+        # (CMP_HELM_REPO_SYNC_TTL, default 300s). Failure is non-fatal: helm dep build
         # may still succeed with public repos or a previously written file.
-        if command -v repo-sync >/dev/null 2>&1; then
-            repo-sync || log "WARNING: repo-sync failed (continuing with existing repositories.yaml)"
+        if command -v helm-repo-sync >/dev/null 2>&1; then
+            helm-repo-sync || log "WARNING: helm-repo-sync failed (continuing with existing repositories.yaml)"
         fi
         log "building helm dependencies"
         DEP_ATTEMPTS=3
@@ -148,8 +148,6 @@ $1"
         i=1
         while [ "$i" -le "$DEP_ATTEMPTS" ]; do
             if timeout "${DEP_TIMEOUT}s" helm dep build "$CHART_DIR" \
-                --repository-cache /tmp/helm-cache \
-                --repository-config /tmp/helm-config/helm/repositories.yaml \
                 >/tmp/dep.log 2>&1; then
                 dep_ok=1
                 break

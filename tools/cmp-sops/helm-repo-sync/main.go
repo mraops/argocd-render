@@ -1,4 +1,4 @@
-// Command repo-sync materializes helm's repositories.yaml from ArgoCD
+// Command helm-repo-sync materializes helm's repositories.yaml from ArgoCD
 // repository Secrets. It is meant to run inside the ArgoCD repo-server CMP
 // sidecar before `helm dep build`, so private helm-chart dependencies resolve
 // with the same credentials already configured in ArgoCD Repositories.
@@ -10,13 +10,14 @@
 // in-cluster Kubernetes API and writing a helm-compatible repositories.yaml.
 //
 // It is idempotent: a successful run writes a timestamp marker; subsequent runs
-// within CMP_REPO_SYNC_TTL seconds exit immediately. Credentials are written
+// within CMP_HELM_REPO_SYNC_TTL seconds exit immediately. Credentials are written
 // to the output file (mode 0600) but never logged.
 package main
 
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -33,16 +34,16 @@ import (
 const (
 	labelKey    = "argocd.argoproj.io/secret-type"
 	labelValue  = "repository"
-	defaultTTL  = 300 // seconds
-	defaultOut  = "/tmp/helm-config/helm/repositories.yaml"
+	defaultTTL  = 86400 // seconds
+	defaultOut  = "/tmp/helm-config/repositories.yaml"
 	saTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	saCAFile    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 	saNSFile    = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
-	apiHostEnv  = "CMP_REPO_SYNC_API_HOST"  // default: kubernetes.default.svc
-	ttlEnv      = "CMP_REPO_SYNC_TTL"       // seconds
-	outEnv      = "CMP_REPO_SYNC_OUT"       // repositories.yaml path
-	nsEnv       = "CMP_REPO_SYNC_NAMESPACE" // namespace to read secrets from
-	insecureEnv = "CMP_REPO_SYNC_INSECURE"  // skip TLS verify (debug only)
+	apiHostEnv  = "CMP_HELM_REPO_SYNC_API_HOST"  // default: kubernetes.default.svc
+	ttlEnv      = "CMP_HELM_REPO_SYNC_TTL"       // seconds
+	outEnv      = "CMP_HELM_REPO_SYNC_OUT"       // repositories.yaml path
+	nsEnv       = "CMP_HELM_REPO_SYNC_NAMESPACE" // namespace to read secrets from
+	insecureEnv = "CMP_HELM_REPO_SYNC_INSECURE"  // skip TLS verify (debug only)
 )
 
 // secret mirrors the fields we need from a Kubernetes Secret.
@@ -69,7 +70,7 @@ type repoEntry struct {
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "[repo-sync] ERROR: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[helm-repo-sync] ERROR: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -80,7 +81,7 @@ func run() error {
 	// TTL short-circuit: skip the API entirely when the cache is fresh.
 	if ttl := envInt(ttlEnv, defaultTTL); ttl > 0 {
 		if age, ok := fileAge(out); ok && age < time.Duration(ttl)*time.Second {
-			fmt.Fprintf(os.Stderr, "[repo-sync] repositories.yaml up to date (age %ds, ttl %ds)\n", int(age.Seconds()), ttl)
+			fmt.Fprintf(os.Stderr, "[helm-repo-sync] repositories.yaml up to date (age %ds, ttl %ds)\n", int(age.Seconds()), ttl)
 			return nil
 		}
 	}
@@ -109,11 +110,11 @@ func run() error {
 	if len(entries) == 0 {
 		// No helm repos configured. Write an empty (but valid) repositories.yaml
 		// so helm sees a well-formed file and we still record the sync timestamp.
-		fmt.Fprintf(os.Stderr, "[repo-sync] no http helm repositories found (%d secrets seen, %d skipped)\n", len(secrets), skipped)
+		fmt.Fprintf(os.Stderr, "[helm-repo-sync] no http helm repositories found (%d secrets seen, %d skipped)\n", len(secrets), skipped)
 		return writeRepositories(out, nil, time.Now())
 	}
 
-	fmt.Fprintf(os.Stderr, "[repo-sync] synced %d http helm repos (%d skipped)\n", len(entries), skipped)
+	fmt.Fprintf(os.Stderr, "[helm-repo-sync] synced %d http helm repos (%d skipped)\n", len(entries), skipped)
 	return writeRepositories(out, entries, time.Now())
 }
 
@@ -130,7 +131,7 @@ func resolveNamespace() (string, error) {
 }
 
 // newHTTPClient builds an http.Client trusting the cluster CA from the
-// serviceaccount secret. CMP_REPO_SYNC_INSECURE=1 disables verification
+// serviceaccount secret. CMP_HELM_REPO_SYNC_INSECURE=1 disables verification
 // (debug only).
 func newHTTPClient() (*http.Client, error) {
 	insecure := os.Getenv(insecureEnv) == "1" || os.Getenv(insecureEnv) == "true"
@@ -189,12 +190,38 @@ func listSecrets(client *http.Client, host, ns, token string) ([]secret, error) 
 }
 
 // filterSecrets keeps HTTP/HTTPS helm repositories (type: helm, not OCI) and
-// drops git/OCI/invalid entries. Credentials come from stringData-normalized
-// fields (ArgoCD writes them as stringData; the API returns base64 in `data`,
-// but ArgoCD's repository Secret `data` is already plain strings for these
-// fields when read back — we handle both by treating values as-is).
+// drops git/OCI/invalid entries. The Kubernetes API returns Secret `data`
+// base64-encoded (whether the Secret was created via `data` or `stringData`),
+// so each field is decoded to its plaintext before any comparison or use.
+// A field that fails to decode (should not happen for a well-formed Secret)
+// causes the whole Secret to be skipped with a warning.
 func filterSecrets(items []secret) (entries []repoEntry, skipped int) {
 	for _, s := range items {
+		// Decode every data field from base64. Kubernetes stores all Secret
+		// values base64-encoded in `data`; without this, comparisons like
+		// `type == "helm"` silently never match (base64("helm") != "helm")
+		// and credentials land in repositories.yaml still encoded.
+		dec := make(map[string]string, len(s.Data))
+		bad := false
+		for k, v := range s.Data {
+			if v == "" {
+				dec[k] = ""
+				continue
+			}
+			b, err := base64.StdEncoding.DecodeString(v)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[helm-repo-sync] skip %s: field %q is not valid base64: %v\n", s.Metadata.Name, k, err)
+				bad = true
+				break
+			}
+			dec[k] = string(b)
+		}
+		if bad {
+			skipped++
+			continue
+		}
+		s.Data = dec
+
 		typ := s.Data["type"]
 		url := s.Data["url"]
 		name := s.Data["name"]
@@ -206,17 +233,17 @@ func filterSecrets(items []secret) (entries []repoEntry, skipped int) {
 		// covered by ArgoCD's native provideGitCreds — both out of scope here.
 		if typ != "helm" {
 			skipped++
-			fmt.Fprintf(os.Stderr, "[repo-sync] skip %s: type=%q (not helm)\n", name, typ)
+			fmt.Fprintf(os.Stderr, "[helm-repo-sync] skip %s: type=%q (not helm)\n", name, typ)
 			continue
 		}
 		if strings.EqualFold(s.Data["enableOCI"], "true") {
 			skipped++
-			fmt.Fprintf(os.Stderr, "[repo-sync] skip %s: OCI registry (use helm registry login)\n", name)
+			fmt.Fprintf(os.Stderr, "[helm-repo-sync] skip %s: OCI registry (use helm registry login)\n", name)
 			continue
 		}
 		if url == "" {
 			skipped++
-			fmt.Fprintf(os.Stderr, "[repo-sync] skip %s: empty url\n", name)
+			fmt.Fprintf(os.Stderr, "[helm-repo-sync] skip %s: empty url\n", name)
 			continue
 		}
 		entries = append(entries, repoEntry{
@@ -225,7 +252,7 @@ func filterSecrets(items []secret) (entries []repoEntry, skipped int) {
 			Username: s.Data["username"],
 			Password: s.Data["password"],
 		})
-		fmt.Fprintf(os.Stderr, "[repo-sync] add %s -> %s\n", name, url)
+		fmt.Fprintf(os.Stderr, "[helm-repo-sync] add %s -> %s\n", name, url)
 	}
 	return entries, skipped
 }

@@ -1,7 +1,12 @@
-build/
+
 *.txt
-argocd-render
+
 todo
 
 # Build artifacts (local builds, not committed)
-tools/repo-sync/repo-sync
+tools/cmp-sops/helm-repo-sync/helm-repo-sync
+argocd-render
+build/
+# AI
+.zcode
+.claude

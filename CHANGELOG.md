@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.4.0
+
+### Added
+- **CMP sidecar для ArgoCD repo-server** (`tools/cmp-sops/`) — рендерит helm-чарты с on-the-fly дешифровкой SOPS-секретов прямо в кластере. argocd-render помечает приложения с `secrets*.yaml` как `source.plugin: {name: sops}`, и этот sidecar выполняет фактический рендер
+  - `sops-generate.sh` — CMP-генератор: три режима (argocd-render / standard helm / full-render), multi-env и single-env values, helm dep build с retry
+  - `Dockerfile` — образ на базе `argocd:v3.4.4` с sops/helm/helm-secrets/yq
+  - README по подключению (RBAC через `repoServer.rbac`, CMP plugin config, SOPS_AGE_KEY)
+- **`helm-repo-sync`** (`tools/cmp-sops/helm-repo-sync/`) — Go CLI, закрывает архитектурное ограничение ArgoCD v3 (CMP sidecar не получает repository-credentials). Читает ArgoCD repository-Secret'ы (`type: helm`, не OCI) через in-cluster Kubernetes API и пишет helm-совместимый `repositories.yaml`. TTL-кэширование, base64-декодирование данных Secret'ов, atomic-write (0600), credentials не логируются
+- Утилиты локального шифрования SOPS (`tools/sops/`) — `make encrypt/decrypt` + пример `.sops.yaml`
+
+### Changed
+- Структура `tools/` перегруппирована: `tools/cmp-sops/` (образ sidecar) и `tools/sops/` (локальные утилиты)
+- `tools/repo-sync` → `tools/cmp-sops/helm-repo-sync`; бинарник, Go-модуль, log-префикс и env-var'ы (`CMP_HELM_REPO_SYNC_*`) переименованы для консистентности
+- `tools/Dockerfile.sops-cmp` → `tools/cmp-sops/Dockerfile`
+- В `sops-generate.sh` env-var `ARGOCD_ENV_APP_ENV` → `ARGOCD_ENV_VALUES_ENV` (значение в `source.plugin.env`: `APP_ENV` → `VALUES_ENV`)
+- Убраны избыточные флаги `--repository-cache`/`--repository-config` из `helm dep build` — helm берёт пути из `HELM_CACHE_HOME`/`HELM_CONFIG_HOME`; путь `repositories.yaml` приведён к канону helm (`/tmp/helm-config/repositories.yaml`)
+- Удалён `tools/repo-rbac.example.yaml` — RBAC описан в README через `repoServer.rbac` чарта `argo-cd`
+
+### Breaking changes
+- Application CR с `source.plugin.env: APP_ENV` нужно переименовать в `VALUES_ENV`
+- Образ CMP sidecar меняет тег/расположение (Dockerfile переехал в `tools/cmp-sops/`)
+
 ## v0.3.11
 
 ### Changed
