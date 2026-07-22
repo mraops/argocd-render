@@ -15,7 +15,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        binary: [argocd-render, helm-repo-sync]
         include:
           # argocd-render: CLI tool, distributed for linux + macOS
           - binary: argocd-render
