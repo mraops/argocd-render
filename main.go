@@ -1106,6 +1106,49 @@ func prepareDeps(chartDirs []string) bool {
 	return true
 }
 
+// cmdClean removes helm dependency artifacts and the render cache so the next
+// render rebuilds everything from scratch. It clears, per chart dir:
+//   - charts/       (vendored dependencies: .tgz archives and unpacked subcharts)
+//   - Chart.lock    (helm dependency lockfile)
+//   - .dep.md5      (argocd-render's dep-build skip marker)
+//
+// and the global cache at .render-cache/ (helm cache/config/data, dep hashes).
+func cmdClean() {
+	fmt.Println("Cleaning helm dependency artifacts and cache...")
+	chartDirs := collectChartDirs("")
+	for _, chartDir := range chartDirs {
+		// charts/ — vendored dependencies (whole directory: .tgz + unpacked subcharts).
+		// helm recreates it on the next `helm dep build`.
+		chartsSub := filepath.Join(chartDir, "charts")
+		if _, err := os.Stat(chartsSub); err == nil {
+			if err := os.RemoveAll(chartsSub); err != nil {
+				fmt.Fprintf(os.Stderr, "  WARNING remove %s/charts: %v\n", filepath.Base(chartDir), err)
+			} else {
+				fmt.Printf("  Removed: %s/charts/\n", filepath.Base(chartDir))
+			}
+		}
+		// Chart.lock and .dep.md5
+		for _, name := range []string{"Chart.lock", ".dep.md5"} {
+			if err := os.Remove(filepath.Join(chartDir, name)); err == nil {
+				fmt.Printf("  Removed: %s/%s\n", filepath.Base(chartDir), name)
+			}
+		}
+	}
+	// Global render cache (helm cache/config/data + any stray state)
+	if info, err := os.Stat(cacheDir); err == nil && info.IsDir() {
+		if err := os.RemoveAll(cacheDir); err != nil {
+			fmt.Fprintf(os.Stderr, "  WARNING remove %s: %v\n", cacheDir, err)
+		} else {
+			rel, _ := filepath.Rel(repoRoot, cacheDir)
+			fmt.Printf("  Removed: %s/\n", rel)
+		}
+	}
+	if len(chartDirs) == 0 {
+		fmt.Println("  No charts found")
+	}
+	fmt.Println("Done.")
+}
+
 // --- Rendering ---
 
 func helmTemplateToDir(chartDir, releaseName, namespace string, valuesData map[string]interface{}, outputDir string) ([]string, error) {
@@ -2072,6 +2115,7 @@ func main() {
 		fullRender bool
 		encrypt    string
 		decrypt    string
+		clean      bool
 		setArgs    multiString
 	)
 
@@ -2143,6 +2187,7 @@ func main() {
 	flagSet.BoolVar(&fullRender, "full-render", false, "Full render Helm charts to raw YAML")
 	flagSet.StringVar(&encrypt, "encrypt", "", "Encrypt YAML file or directory via SOPS")
 	flagSet.StringVar(&decrypt, "decrypt", "", "Decrypt SOPS file or directory")
+	flagSet.BoolVar(&clean, "clean", false, "Remove helm dependency artifacts and render cache, then exit")
 	flagSet.Var(&setArgs, "set", "Set helm values (key=value, can be repeated)")
 	flagSet.Parse(filteredArgs[1:])
 
@@ -2153,6 +2198,11 @@ func main() {
 
 	if debugMode {
 		_ = debugMode
+	}
+
+	if clean {
+		cmdClean()
+		return
 	}
 
 	if encrypt != "" {
@@ -2278,6 +2328,7 @@ func newFlagSet(name string) *flag.FlagSet {
 		fmt.Fprintf(os.Stderr, "  %s --set image.tag=v1.0 --set replicas=3\n", name)
 		fmt.Fprintf(os.Stderr, "  %s --encrypt projects/<stage>/apps/<app>  Encrypt secrets* files (SOPS/age)\n", name)
 		fmt.Fprintf(os.Stderr, "  %s --decrypt projects/<stage>/apps/<app>  Decrypt secrets* files\n", name)
+		fmt.Fprintf(os.Stderr, "  %s --clean                            Remove helm dep artifacts and render cache\n", name)
 	}
 	return fs
 }

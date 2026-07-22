@@ -2,3 +2,6 @@ build/
 *.txt
 argocd-render
 todo
+
+# Build artifacts (local builds, not committed)
+tools/repo-sync/repo-sync
